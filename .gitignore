@@ -1,0 +1,5 @@
+watcher.log
+navigate.log
+__pycache__/
+*.pyc
+config.local.json

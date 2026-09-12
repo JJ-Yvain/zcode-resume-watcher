@@ -1,0 +1,52 @@
+{
+  "message": "任务意外中断，请继续！",
+  "poll_seconds": 1.0,
+  "log_dir": "~/.zcode/cli/log",
+  "window_exe": "zcode.exe",
+  "window_title": "ZCode",
+  "exclude_session_prefixes": [
+    "sess_subagent"
+  ],
+  "resume_error_codes": [
+    "model_request_failed"
+  ],
+  "resume_empty_reason": "empty_model_response",
+  "rollout_dir": "~/.zcode/cli/rollout",
+  "quota_enabled": true,
+  "quota_needles": [
+    "qoder error 403",
+    "\"code\":\"115\"",
+    "agentLimitResetTime"
+  ],
+  "quota_reset_regex": "agentLimitResetTime[^\\d]{0,4}(\\d{10,13})",
+  "navigate_enabled": true,
+  "db_path": "~/.zcode/cli/db/db.sqlite",
+  "nav_item_class_regex": "task-item",
+  "nav_group_class_regex": "space-y-2",
+  "nav_header_class_regex": "min-w-12",
+  "navigate_fail_fallback_send": false,
+  "draft_check_enabled": true,
+  "trigger_mode": "broad",
+  "exclude_error_causes": [
+    "model_request_cancelled",
+    "provider_not_configured",
+    "MEDIA_BUDGET_CURRENT_IMAGE_TOO_LARGE"
+  ],
+  "exclude_error_codes": [
+    "TURN_CANCELLED"
+  ],
+  "circuit_breaker_limit": 5,
+  "quota_structural_enabled": true,
+  "quota_responseid_regex": "(?i)-error",
+  "quota_text_regex": "^\\s*\\[?[a-z][a-z0-9_-]* error \\d{3}[:\\]]",
+  "judge_enabled": false,
+  "judge_endpoint": "http://127.0.0.1:20128/v1/chat/completions",
+  "judge_model": "",
+  "judge_cooldown_seconds": 300.0,
+  "judge_max_chars": 400,
+  "stall_enabled": false,
+  "stall_timeout_seconds": 900.0,
+  "heartbeat_minutes": 30,
+  "check_updates": true,
+  "mac_app_name": "ZCode"
+}
