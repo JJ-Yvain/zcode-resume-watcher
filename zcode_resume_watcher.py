@@ -31,8 +31,9 @@ completed/failed,视为挂起,每个 turnId 只触发一次续命。
 Windows: UIA 聚焦走同目录 uia_focus_input.ps1,智能归位走 uia_navigate_input.ps1,
 注入链 置前(AttachThreadInput)→ UIA SetFocus → PostMessage WM_CHAR 逐字符 → 回车,
 全程不依赖 SendInput(普通进程 SendInput 不可用);
-macOS(v1): osascript 激活 + 剪贴板粘贴(Cmd+V) + 回车,无智能归位/草稿检测,
-需在系统设置授予辅助功能权限。
+macOS(v1.5): 智能归位走 System Events AX 树(db 反查→找行点击→顶栏验证,选择器
+阈值待真机 PROBE 实测修正);注入为 osascript 激活+剪贴板粘贴(Cmd+V)+回车,
+需在系统设置授予辅助功能权限;草稿检测仍缺。
 另提供 `--audit` 覆盖审计(只读):扫描近 N 天事件日志/watcher.log/rollout,
 输出①全部失败签名与现行处置(含"被黑名单排除、可调整"提示)②规则↔实际
 动作交叉核验(找出"应触发但未处理"=漏发,并区分"未运行"与"运行中异常")
@@ -500,13 +501,139 @@ def inject_text(hwnd, text, focus_done=False):
     return True
 
 
-# ------------------------- macOS 注入(osascript) -------------------------
+# ------------------------- macOS 注入与智能归位(osascript) -------------------------
+# AX 导航脚本:mode=PROBE 倾倒可见元素(role|name|value,截 150 条,首次实测定选择器用);
+# mode=NAV 扫描含标题的元素→顶栏已匹配返回 ALREADY,否则点击侧栏行返回 CLICKED;
+# mode=VERIFY 扫描"顶栏条带"(窗口顶部、横向偏右)内 name 精确等于标题的元素。
+# 标题经 argv 传入免转义;阈值是盲定初值,等 --test-navigate 的 PROBE 实测数据修正。
+_MAC_NAV_OSASCRIPT = (
+    'on run argv\n'
+    'set tTitle to item 1 of argv\n'
+    'set mode to item 2 of argv\n'
+    'tell application "System Events"\n'
+    'if not (exists process "%s") then return "NOPROC"\n' % MAC_APP_NAME +
+    'tell process "%s"\n' % MAC_APP_NAME +
+    'set frontmost to true\n'
+    'delay 0.5\n'
+    'if (count of windows) = 0 then return "NOWIN"\n'
+    'set w to window 1\n'
+    'try\n'
+    'set wpos to position of w\n'
+    'set wsz to size of w\n'
+    'on error\n'
+    'return "AXERR"\n'
+    'end try\n'
+    'set wx to item 1 of wpos\n'
+    'set wy to item 2 of wpos\n'
+    'set ww to item 1 of wsz\n'
+    'set allEls to {}\n'
+    'try\n'
+    'with timeout of 25 seconds\n'
+    'set allEls to entire contents of w\n'
+    'end timeout\n'
+    'on error\n'
+    'return "AXERR"\n'
+    'end try\n'
+    'set out to ""\n'
+    'set n to 0\n'
+    'repeat with e in allEls\n'
+    'set nm to ""\n'
+    'set vl to ""\n'
+    'try\n'
+    'set nm to name of e\n'
+    'end try\n'
+    'try\n'
+    'set vl to value of e as string\n'
+    'end try\n'
+    'if mode = "PROBE" then\n'
+    'if (nm is not "" or vl is not "") and n < 150 then\n'
+    'try\n'
+    'set r to role of e\n'
+    'on error\n'
+    'set r to "?"\n'
+    'end try\n'
+    'if (length of vl) > 40 then set vl to (text 1 thru 40 of vl) & "..." \n'
+    'set out to out & r & "|" & nm & "|" & vl & linefeed\n'
+    'set n to n + 1\n'
+    'end if\n'
+    'else\n'
+    'set hitN to false\n'
+    'set hitV to false\n'
+    'if nm is not "" then set hitN to (nm contains tTitle)\n'
+    'if vl is not "" then set hitV to (vl contains tTitle)\n'
+    'if hitN or hitV then\n'
+    'set exact to (nm = tTitle) or (vl = tTitle)\n'
+    'try\n'
+    'set p to position of e\n'
+    'set px to (item 1 of p) - wx\n'
+    'set py to (item 2 of p) - wy\n'
+    'on error\n'
+    'set px to 0\n'
+    'set py to 99999\n'
+    'end try\n'
+    'set inTop to (py < 150) and (px > ww * 0.22)\n'
+    'if inTop and exact then return "ALREADY"\n'
+    'if mode = "NAV" and py >= 150 then\n'
+    'try\n'
+    'click e\n'
+    'return "CLICKED"\n'
+    'end try\n'
+    'end if\n'
+    'end if\n'
+    'end if\n'
+    'end repeat\n'
+    'if mode = "PROBE" then return out\n'
+    'return "NOMATCH"\n'
+    'end tell\n'
+    'end tell\n'
+    'end run'
+)
+
+
+def mac_nav_script(title, mode):
+    """跑 AX 导航脚本。返回 (status, detail);status∈{ALREADY,CLICKED,VERIFIED,
+    NOMATCH,PROBE转储,NOPROC,NOWIN,AXERR}。非零退出码一律折算成 AXERR+stderr。"""
+    try:
+        r = subprocess.run(["osascript", "-e", _MAC_NAV_OSASCRIPT, title, mode],
+                           capture_output=True, timeout=40)
+    except OSError as e:
+        return "AXERR", str(e)
+    if r.returncode != 0:
+        return "AXERR", r.stderr.decode("utf-8", "replace").strip()[:200]
+    return r.stdout.decode("utf-8", "replace").strip(), ""
+
+
+def mac_navigate(title):
+    """macOS 智能归位:NAV(必要时点击)→ VERIFY 顶栏。
+    返回 (verified, blind):
+      verified=True  顶栏已确认是目标会话;
+      verified=False, blind=True  AX 不可读(NOPROC/NOWIN/AXERR),界面看不清;
+      verified=False, blind=False  AX 可读但没找到/点了却验证不到。"""
+    status, detail = mac_nav_script(title, "NAV")
+    if status == "CLICKED":
+        time.sleep(0.6)
+        status, detail = mac_nav_script(title, "VERIFY")
+    if status in ("ALREADY", "VERIFIED"):
+        return True, False
+    if status in ("NOPROC", "NOWIN", "AXERR"):
+        log("mac 归位: AX 不可读(%s %s)" % (status, detail))
+        return False, True
+    log("mac 归位: 未验证到顶栏标题(%s)「%s」(详见 navigate.log)" % (status, title))
+    try:
+        with open(NAV_LOG, "a", encoding="utf-8") as f:
+            f.write("%s mac-navigate %s %s\n" % (datetime.datetime.now()
+                    .strftime("%Y-%m-%d %H:%M:%S"), status, title))
+    except OSError:
+        pass
+    return False, False
+
+
 def mac_inject_text(text):
     """macOS 注入:激活 ZCode → 文本经 argv 进 AppleScript 剪贴板 → Cmd+V → 回车 →
     恢复原剪贴板。中文/emoji 走剪贴板粘贴(System Events keystroke 对 CJK 不可靠);
     文本经 osascript 的 run argv 传入,无需手工转义。
     前置条件:在 系统设置 → 隐私与安全性 → 辅助功能 中授权运行环境(终端/Python)。
-    v1 限制:不做智能归位与草稿检测(AX 树待实测),发送目标为 ZCode 当前焦点会话。"""
+    草稿检测 v1.5 仍缺(AXValue 读取待实测),发送前请留意输入框。"""
     old_clip = ""
     try:
         r = subprocess.run(["pbpaste"], capture_output=True, timeout=5)
@@ -543,12 +670,31 @@ def mac_inject_text(text):
 
 
 def _trigger_resume_macos(reason, evt, args):
-    """macOS 触发链:无窗口句柄/智能归位/草稿检测(均依赖 Windows UIA),
-    检测与守卫(去重/熔断)与 Windows 完全同一套,仅发送末端不同。"""
+    """macOS 触发链:检测与守卫(去重/熔断)与 Windows 同一套;发送前按
+    NAVIGATE_ENABLED 走 mac 智能归位(db 反查标题→AX 找行点击→顶栏验证)。
+    AX 可读但找不到/验证不到 → 宁可不发;AX 整体不可读(看不清界面)→
+    退回"激活当前会话"发送并大声记日志——宁可降级,不做哑巴工具。"""
     sess = evt.get("sessionId") or ""
     if args.dry_run:
-        log("[dry-run] 将发送 '%s' (%s, %s, 平台: macOS 无归位)" % (MESSAGE, reason, sess))
+        if NAVIGATE_ENABLED:
+            target = resolve_session_target(sess)
+            detail = ("归位目标「%s」(mac AX)" % target["title"]) if target else "归位:DB解析失败"
+        else:
+            detail = "归位:关"
+        log("[dry-run] 将发送 '%s' (%s, %s, %s)" % (MESSAGE, reason, sess, detail))
         return False
+    if NAVIGATE_ENABLED:
+        target = resolve_session_target(sess)
+        if target is None:
+            log("mac 归位: DB 解析不到会话 %s,按当前会话直接发送" % sess)
+        else:
+            verified, blind = mac_navigate(target["title"])
+            if not verified and not blind:
+                log("按「宁可不发」策略放弃本次发送 (%s, %s)" % (reason, sess))
+                return False
+            if blind:
+                log("mac AX 不可读,退回发送到当前焦点会话 (%s, %s) "
+                    "-- 建议跑 --test-navigate %s 收集界面数据" % (reason, sess, sess))
     sent = mac_inject_text(MESSAGE)
     if sent:
         log("已自动发送 '%s' (%s, %s)" % (MESSAGE, reason, sess))
@@ -1509,8 +1655,22 @@ def main():
         return
     if args.test_navigate:
         if IS_MACOS:
-            print("macOS 暂不支持智能归位(v1 限制,见 README)", flush=True)
-            sys.exit(9)
+            sess = args.test_navigate
+            target = resolve_session_target(sess)
+            if target is None:
+                print("DB 解析失败: 会话 %s 无标题记录或库不可读" % sess, flush=True)
+                sys.exit(2)
+            print("目标: 「%s」 项目=%s" % (target["title"], target["project"]), flush=True)
+            print("== PROBE: 倾倒 ZCode 窗口可见元素(role|name|value,截 150 条) ==",
+                  flush=True)
+            dump, _ = mac_nav_script(target["title"], "PROBE")
+            print(dump if dump else "(AX 不可读——确认 ZCode 在前台运行且已授权辅助功能)",
+                  flush=True)
+            print("== NAV(点击)+ VERIFY 顶栏 ==", flush=True)
+            verified, blind = mac_navigate(target["title"])
+            print("归位结果: verified=%s blind=%s" % (verified, blind), flush=True)
+            print("把以上完整输出贴回开发侧,即可修正顶栏阈值与行选择器", flush=True)
+            sys.exit(0 if verified else (8 if blind else 3))
         sess = args.test_navigate
         hwnd = find_zcode_hwnd()
         if hwnd is None:
