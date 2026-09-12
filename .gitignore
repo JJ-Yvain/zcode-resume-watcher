@@ -3,3 +3,7 @@ navigate.log
 __pycache__/
 *.pyc
 config.local.json
+tests/rollout/
+tests/syn-log/
+tests/syn-watcher.log
+tests/test-watcher.log
