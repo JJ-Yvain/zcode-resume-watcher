@@ -333,12 +333,17 @@ def _focused_child_hwnd(hwnd):
     return hwnd
 
 
-class _GUITHREADINFO(ctypes.Structure):
-    _fields_ = [("cbSize", ctypes.c_uint), ("flags", ctypes.c_uint),
-                ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
-                ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
-                ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
-                ("rcCaret", wintypes.RECT)]
+if IS_WINDOWS:
+    class _GUITHREADINFO(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("flags", ctypes.c_uint),
+                    ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+                    ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                    ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
+                    ("rcCaret", wintypes.RECT)]
+else:
+    class _GUITHREADINFO(object):
+        """非 Windows 占位类型:仅保证模块可导入(检测层跨平台),注入不会在此平台调用。"""
+        _fields_ = []
 
 
 def uia_focus_input():

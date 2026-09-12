@@ -12,6 +12,9 @@ import shutil
 import sys
 import time
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows runner stdout 可能是 cp1252
+
 SCR = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(SCR)   # public repo layout: tests/ sits next to the main script
 ROLL = os.path.join(SCR, "rollout")
