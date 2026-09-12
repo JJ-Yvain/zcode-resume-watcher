@@ -22,6 +22,8 @@ jobs:
       - name: Synthetic regression (57 checks, no real messages sent)
         run: python tests/driver.py
       - name: CLI smoke (--version / --check-updates)
+        env:
+          PYTHONIOENCODING: utf-8   # Windows runner stdout 默认 cp1252,会炸中文输出
         run: |
           python zcode_resume_watcher.py --version
           python zcode_resume_watcher.py --check-updates
