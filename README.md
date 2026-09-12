@@ -59,9 +59,15 @@ cd zcode-resume-watcher
 系统 python3），都没有就自动安装 uv 官方托管版 Python 到你的用户目录（免管理员、
 不碰系统目录，与 Windows 端的自动引导对等；下载来源见脚本内说明）。
 
-**必须先授权**：系统设置 → 隐私与安全性 → **辅助功能**，勾选你的终端 / Python 运行环境（注入依赖 AppleScript 模拟按键）。
+**必须先授权**：系统设置 → 隐私与安全性 → **辅助功能**，勾选你的终端 / Python 运行环境（注入与智能归位都依赖 AppleScript 模拟按键/读取界面）。
 
-**macOS v1 范围**：检测与守卫与 Windows 完全同一套；注入为"激活 ZCode → 剪贴板粘贴 → 回车"（自动恢复剪贴板）。暂不支持智能归位与草稿检测，消息发往 ZCode 当前焦点会话——请保持出错会话在前台。
+**macOS 智能归位（v1.5，beta）**：与 Windows 同思路——从本地数据库反查出会话标题，在 ZCode 界面里找到该会话行并点击，验证顶栏标题后发送；**看不清界面（AX 不可读）时自动降级为发送到当前会话并记日志，看得清但找不到目标会话时宁可不发**。首次适配建议跑一次诊断，把输出贴给开发者即可完成选择器校准：
+
+```bash
+python3 zcode_resume_watcher.py --test-navigate <sessionId>
+```
+
+暂不支持草稿检测（发送前请留意输入框是否有未发送内容）。
 
 ## 常用命令
 
@@ -135,5 +141,5 @@ python zcode_resume_watcher.py --version            # 当前版本
 - **Detection**: dual-channel (event log + model-IO log), unknown error types covered by default, user-initiated cancellations and hopeless errors never triggered, per-session circuit breaker (5 sends, reset on success).
 - **Smart re-focus** (Windows): resolves the session title from the local database, clicks the sidebar entry, verifies via the header title, and aborts if a draft is present (better to miss one than to send into the wrong conversation).
 - **Fully local**: zero third-party dependencies, no telemetry; `--check-updates` only pings the GitHub API (disable via `check_updates: false`).
-- **Platforms**: Windows full-featured; macOS experimental (AppleScript paste injection, Accessibility permission required, no re-focus/draft-check in v1).
+- **Platforms**: Windows full-featured; macOS experimental (AppleScript injection + AX-based smart re-focus in beta; Accessibility permission required; no draft-check yet).
 - **Install**: grab the zip from [Releases](../../releases), run `启动自动续命.bat` (Windows) or `./启动自动续命.command` (macOS) — both auto-bootstrap a user-local Python if none is present. See the Chinese sections above for full details.
