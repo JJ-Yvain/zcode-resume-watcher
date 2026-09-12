@@ -12,8 +12,8 @@ import shutil
 import sys
 import time
 
-PROJ = os.path.dirname(SCR)   # public repo layout: tests/ sits next to the main script
 SCR = os.path.dirname(os.path.abspath(__file__))
+PROJ = os.path.dirname(SCR)   # public repo layout: tests/ sits next to the main script
 ROLL = os.path.join(SCR, "rollout")
 shutil.rmtree(ROLL, ignore_errors=True)
 os.makedirs(ROLL)

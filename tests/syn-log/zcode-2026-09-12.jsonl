@@ -1,0 +1,4 @@
+{"timestamp": "2026-09-12T10:12:43.000Z", "event": "turn.failed", "sessionId": "sess_miss-1", "turnId": "turn_miss", "error": {"code": "UNKNOWN_ERROR", "message": "Turn execution failed", "cause": {"code": "model_request_failed"}}}
+{"timestamp": "2026-09-12T11:12:43.000Z", "event": "turn.failed", "sessionId": "sess_blk-1", "turnId": "turn_blk", "error": {"code": "UNKNOWN_ERROR", "message": "Turn execution failed", "cause": {"code": "model_rate_limited"}}}
+{"timestamp": "2026-09-12T11:12:43.000Z", "event": "turn.started", "sessionId": "sess_dang-1", "turnId": "turn_dangling", "error": null}
+{"timestamp": "2026-09-12T13:12:13.000Z", "event": "turn.started", "sessionId": "sess_fly-1", "turnId": "turn_inflight", "error": null}
