@@ -52,8 +52,12 @@ ZCode 里跑长任务时，两类失败会让任务悄悄死掉，人却未必�
 ```bash
 git clone https://github.com/JJ-Yvain/zcode-resume-watcher.git
 cd zcode-resume-watcher
-python3 zcode_resume_watcher.py
+./启动自动续命.command        # 或在访达里双击它
 ```
+
+**无需预装 Python**：启动器自动探测已有解释器（Homebrew / uv 托管 / 已装命令行工具的
+系统 python3），都没有就自动安装 uv 官方托管版 Python 到你的用户目录（免管理员、
+不碰系统目录，与 Windows 端的自动引导对等；下载来源见脚本内说明）。
 
 **必须先授权**：系统设置 → 隐私与安全性 → **辅助功能**，勾选你的终端 / Python 运行环境（注入依赖 AppleScript 模拟按键）。
 
@@ -132,4 +136,4 @@ python zcode_resume_watcher.py --version            # 当前版本
 - **Smart re-focus** (Windows): resolves the session title from the local database, clicks the sidebar entry, verifies via the header title, and aborts if a draft is present (better to miss one than to send into the wrong conversation).
 - **Fully local**: zero third-party dependencies, no telemetry; `--check-updates` only pings the GitHub API (disable via `check_updates: false`).
 - **Platforms**: Windows full-featured; macOS experimental (AppleScript paste injection, Accessibility permission required, no re-focus/draft-check in v1).
-- **Install**: grab the zip from [Releases](../../releases), run `启动自动续命.bat` (Windows; auto-bootstraps a portable Python) or `python3 zcode_resume_watcher.py` (macOS). See the Chinese sections above for full details.
+- **Install**: grab the zip from [Releases](../../releases), run `启动自动续命.bat` (Windows) or `./启动自动续命.command` (macOS) — both auto-bootstrap a user-local Python if none is present. See the Chinese sections above for full details.
