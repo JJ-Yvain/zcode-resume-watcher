@@ -133,8 +133,10 @@ TEXT_V = '\n[qoder error 403: {"code":"115","message":"agentLimitResetTime:17892
 hit = w.find_quota_hit(mk("rv", TEXT_V))
 check("T9 变体文本命中+解析 reset", hit is not None and hit[0] == 1789284070224)
 
-# T10 fmt_reset 本地时区换算
-check("T10 时间戳可读化", w.fmt_reset(1789284070224) == "2026-09-13 15:21:10",
+# T10 fmt_reset 本地时区换算(时区无关断言:期望值经 UTC→本地 独立换算路径得出)
+import datetime as _dt
+_exp = _dt.datetime.fromtimestamp(1789284070224 / 1000.0, _dt.timezone.utc).astimezone()
+check("T10 时间戳可读化", w.fmt_reset(1789284070224) == _exp.strftime("%Y-%m-%d %H:%M:%S"),
       w.fmt_reset(1789284070224))
 
 # T11 subagent rollout 文件被文件名过滤
