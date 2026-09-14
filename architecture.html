@@ -362,12 +362,12 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
 
   <div class="hero-log"><span class="ts">2026-09-11 09:43:32</span>  <span class="k">监视器启动</span> (轮询 1.0s, live, 额度监听: 开, 智能归位: 开,宁可不发, 触发: broad, 熔断: 2, 停滞: 关, 心跳: 30min)</div>
 
-  <p class="lede">双日志源感知 → 双通道判定 + 三重守卫 → 归位到出错会话后注入。纯 Python 标准库与 ctypes，不装任何第三方包，全程不依赖 SendInput。</p>
+  <p class="lede">双日志源感知 → 双通道判定 + 三重守卫 → 归位到出错会话后注入。纯 Python 标准库与 ctypes，不装任何第三方包，全程不依赖 SendInput。Windows 全功能；macOS 实验版（v1.5：AX 智能归位 + osascript 注入）。</p>
 
   <dl class="specs">
-    <div><dt>主脚本</dt><dd>1391<span>行 Python</span></dd></div>
+    <div><dt>主脚本</dt><dd>1708<span>行 Python</span></dd></div>
     <div><dt>UIA 脚本</dt><dd>233<span>行 PowerShell</span></dd></div>
-    <div><dt>配置项</dt><dd>34<span>键</span></dd></div>
+    <div><dt>配置项</dt><dd>36<span>键</span></dd></div>
     <div><dt>归位退出码</dt><dd>7<span>种</span></dd></div>
     <div><dt>归位失败</dt><dd>0<span>生产期</span></dd></div>
   </dl>
@@ -565,10 +565,10 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
   <table class="files">
     <thead><tr><th>文件</th><th>规模</th><th>职责</th></tr></thead>
     <tbody>
-      <tr><td>zcode_resume_watcher.py</td><td>1391 行</td><td>全部感知 / 判定 / 守卫 / 归位调度 / 注入 / 审计。纯标准库加 ctypes，单文件。</td></tr>
+      <tr><td>zcode_resume_watcher.py</td><td>1708 行</td><td>全部感知 / 判定 / 守卫 / 归位调度 / 注入 / 审计。纯标准库加 ctypes，单文件。</td></tr>
       <tr><td>uia_navigate_input.ps1</td><td>200 行</td><td>侧栏定位点击、顶栏标题验证、草稿读取。纯 ASCII，中文用码点串传参。</td></tr>
       <tr><td>uia_focus_input.ps1</td><td>33 行</td><td>兜底聚焦：归位未走到输入框时，独立把底部 Edit 设为焦点。</td></tr>
-      <tr><td>config.json</td><td>34 键</td><td>消息文本、两个日志源、黑名单、阈值、正则、判官端点全部可调。</td></tr>
+      <tr><td>config.json</td><td>36 键</td><td>消息文本、两个日志源、黑名单、阈值、正则、判官端点全部可调。</td></tr>
       <tr><td>启动自动续命.bat</td><td>—</td><td>双击常驻。带 Python 自动引导：已装则直接用，没装则从 python.org 拉绿色便携版到用户目录，不碰注册表与 PATH。</td></tr>
       <tr><td>测试发送.bat</td><td>—</td><td>10 秒倒计时后试发一条，用来验证注入链是否通。</td></tr>
       <tr><td>watcher.log / navigate.log</td><td>—</td><td>运行与归位决策日志。含会话标题，因此不进版本库。</td></tr>
