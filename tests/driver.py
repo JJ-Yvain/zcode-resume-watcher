@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """zcode-resume-watcher 合成回归测试(不发送、不碰真实日志)。
 覆盖:额度"假成功"三级判别(T1-T13,T18-T20)、broad 全量接管/黑名单/熔断/停滞(T14-T17,T21)、
-覆盖审计 --audit 机制(T22-T25)。
+覆盖审计 --audit 机制(T22-T25)、上下文压缩自指误报(T29)、送达核验+有界重试+输入框身份判据(T30)、
+退出取证(遗言,T31)、外部评审确认的输入/配置形状防御(T32-T33)。
+三平台 CI 都会跑本文件:平台相关断言分 Win / 非 Win 两支,ps1 编码闸门在无 PowerShell 的机器上显式跳过。
 运行: python driver.py   → 全 PASS 退出码 0。"""
 import datetime
 import importlib.util
@@ -9,14 +11,16 @@ import json
 import os
 import re
 import shutil
+import sqlite3
+import subprocess
 import sys
 import time
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows runner stdout 可能是 cp1252
 
-SCR = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(SCR)   # public repo layout: tests/ sits next to the main script
+SCR = os.path.dirname(os.path.abspath(__file__))
 ROLL = os.path.join(SCR, "rollout")
 shutil.rmtree(ROLL, ignore_errors=True)
 os.makedirs(ROLL)
@@ -503,6 +507,554 @@ env_rec = {"requestId": "q_p25c", "sessionId": "sess_p25",
 hit29 = w.classify_modelio(env_rec, allow_judge=False)
 check("T29d 信封正文+普通 responseId 仍命中额度报错",
       hit29 is not None and hit29[0] == "额度报错")
+
+
+# ---- T30(2026-10-10):送达核验 + 有界重试 + 禁止盲注入 ----
+# 事故现场(私有仓复盘 P27):一次 cause=model_request_failed / providerCode=request_timeout /
+# retryable=false 的 turn.failed 被判为 connection 并"发送成功",但注入整批落空——输入框当时不在
+# 无障碍树里(会话切换/报错态),而 inject_text 的成功判据只是 PostMessage 入队;该会话停摆 7h48m
+# 直到人工补发。本组只测编排(mock 窗口/注入/核验),不碰真窗口、不发送。
+# 注:本文件的 w.trigger_resume 从第 49 行起就被换成 mock 了,故这里重新加载一份干净模块来测真编排。
+_spec30 = importlib.util.spec_from_file_location(
+    "zrw_t30", os.path.join(PROJ, "zcode_resume_watcher.py"))
+w30 = importlib.util.module_from_spec(_spec30)
+_spec30.loader.exec_module(w30)
+LOG30 = []
+w30.log = lambda msg: LOG30.append(msg)
+w30.LOG_FILE = os.path.join(SCR, "t30-exit.log")   # 退出取证直接写文件,重定向到 scratch
+open(w30.LOG_FILE, "w").close()                     # 清空:上一轮跑挂可能留下旧遗言,计数必须从零开始
+w30.load_config()                    # 新键必须能从 config.json 落到模块常量
+check("T30a 新配置键生效(deliver_check_enabled/timeout/resume_max_attempts)",
+      w30.DELIVER_CHECK_ENABLED is True and w30.DELIVER_CHECK_TIMEOUT_SECONDS == 8.0
+      and w30.RESUME_MAX_ATTEMPTS == 3,
+      "timeout=%s attempts=%s" % (w30.DELIVER_CHECK_TIMEOUT_SECONDS, w30.RESUME_MAX_ATTEMPTS))
+
+w30.IS_MACOS = False                # T30-T33 锁定的是 Windows 编排分支(注入/核验/重试);
+                                    # 三平台 CI 都要跑这条,别让它落到 _trigger_resume_macos(osascript)
+w30.NAVIGATE_ENABLED = False         # 绕开真实归位链(UIA / ps1)
+w30.find_zcode_hwnd = lambda: 1
+w30.DELIVER_CHECK_ENABLED = True
+w30.DELIVER_CHECK_TIMEOUT_SECONDS = 0.0
+w30.RESUME_MAX_ATTEMPTS = 3
+w30.RESUME_RETRY_BACKOFF_SECONDS = 0.0
+real_inject30 = w30.inject_text       # 供 T30i/T30j 直接测真注入链
+real_focus30 = w30.uia_focus_input    # T30i 会把 uia_focus_input 换成 mock,这里留真函数给 T32g
+real_wait30 = w30.wait_delivery       # 同上:t30_run 会把 wait_delivery 换成 mock,T33f 要用真函数
+
+class LiveArgs(object):
+    dry_run = False
+    debug = False
+
+ATT30 = []
+def t30_run(verdicts, inject_results=(True,), evt=None):
+    """跑一次真 trigger_resume;verdicts=逐次核验结果,inject_results=逐次注入结果(末尾沿用)。"""
+    del ATT30[:]
+    vi, ii = iter(verdicts), iter(inject_results)
+    mark = len(LOG30)
+    w30.inject_text = lambda hwnd, text, focus_done=False: (ATT30.append(text),
+                                                            next(ii, inject_results[-1]))[1]
+    w30.wait_delivery = lambda sess, since_ms: next(vi, verdicts[-1])
+    r = w30.trigger_resume("connection", evt or {"sessionId": "sess_t30"}, LiveArgs)
+    return r, LOG30[mark:]
+
+r, lg = t30_run([True])
+check("T30b 核验送达→返回 True、只注入一次、记「确认送达」",
+      r is True and len(ATT30) == 1 and any("确认送达" in l for l in lg),
+      "r=%s n=%d logs=%s" % (r, len(ATT30), lg))
+
+r, lg = t30_run([False, True])
+check("T30c 首次未送达→重试一次即送达(注入两次)",
+      r is True and len(ATT30) == 2 and any("确认送达" in l for l in lg)
+      and any("未收到" in l for l in lg))
+
+r, lg = t30_run([False, False, False])
+check("T30d 三次仍未送达→返回 False + 显式「未确认送达」,且无假成功日志",
+      r is False and len(ATT30) == 3 and any("未确认送达" in l for l in lg)
+      and not any("已自动发送" in l for l in lg))
+
+r, lg = t30_run([False, False, False], inject_results=(False,))
+check("T30e 注入未执行(输入框未就绪)→不记成功,重试耗尽即人工介入",
+      r is False and any("注入未执行" in l for l in lg)
+      and any("未确认送达" in l for l in lg))
+
+r, lg = t30_run([None])
+check("T30f 库读不到→退回旧语义(记「未核验」,不因核验能力缺失而停摆)",
+      r is True and any("未核验" in l for l in lg) and any("已自动发送" in l for l in lg))
+
+r, lg = t30_run([True])
+check("T30g 送达路径只写一行日志", len(lg) == 1 and "确认送达" in lg[0])
+
+# 归位遇草稿(退出码 6)→ 不许覆盖,但要有界重试(草稿可能是误读/其它面板输入框,也可能是上一轮残留;
+# 重试只重读、不发送);识别不出聊天输入框(退出码 7)→ 同样不盲打
+w30.NAVIGATE_ENABLED = True
+NAV30 = []
+del ATT30[:]
+w30.navigate_to_session = lambda hwnd, target, sess: (NAV30.append(6), (False, False, 6))[1]
+w30.inject_text = lambda hwnd, text, focus_done=False: (ATT30.append(text), True)[1]
+w30.wait_delivery = lambda sess, since_ms: True
+mark = len(LOG30)
+r = w30.trigger_resume("connection", {"sessionId": "sess_t30"}, LiveArgs)
+lg = LOG30[mark:]
+check("T30h 输入框有草稿(退出码6)→重试到上限、零注入、日志点明不覆盖",
+      r is False and len(NAV30) == 3 and len(ATT30) == 0
+      and any("已尝试 3 次" in l for l in lg) and any("草稿" in l for l in lg))
+
+NAV30b = []
+del ATT30[:]
+w30.navigate_to_session = lambda hwnd, target, sess: (NAV30b.append(7), (False, False, 7))[1]
+mark = len(LOG30)
+r = w30.trigger_resume("connection", {"sessionId": "sess_t30"}, LiveArgs)
+lg = LOG30[mark:]
+check("T30h2 输入框身份未识别(退出码7)→零注入、重试到上限、日志点明拒盲打字",
+      r is False and len(NAV30b) == 3 and len(ATT30) == 0
+      and any("拒绝盲打字" in l for l in lg) and any("已尝试 3 次" in l for l in lg))
+
+# 草稿在第二次尝试时消失(上一次是误读/用户已清空/输入框刚挂载)→ 应继续发出并确认送达
+NAV30c = []
+del ATT30[:]
+_seq = iter([(False, False, 6), (True, True, 0)])
+w30.navigate_to_session = lambda hwnd, target, sess: (NAV30c.append(1), next(_seq, (True, True, 0)))[1]
+mark = len(LOG30)
+r = w30.trigger_resume("connection", {"sessionId": "sess_t30"}, LiveArgs)
+lg = LOG30[mark:]
+check("T30h3 首次草稿误读不再判死→第二次尝试照常送达",
+      r is True and len(NAV30c) == 2 and len(ATT30) == 1
+      and any("确认送达" in l for l in lg))
+
+# inject_text:兜底聚焦失败 → 一个字符都不许打(2026-10-10 漏送的直接成因)
+class FakeU32(object):
+    def __init__(self):
+        self.calls = 0
+    def PostMessageW(self, *a):
+        self.calls += 1
+        return 1
+
+w30.bring_to_front = lambda hwnd: True
+w30.uia_focus_input = lambda: False
+w30.user32 = FakeU32()
+ok = real_inject30(1, w30.MESSAGE)
+check("T30i 兜底聚焦失败→拒绝盲打字(PostMessage 0 次)", ok is False and w30.user32.calls == 0)
+
+w30.uia_focus_input = lambda: True
+w30._focused_child_hwnd = lambda hwnd: 42
+w30.user32 = FakeU32()
+ok = real_inject30(1, "ab", focus_done=True)
+check("T30j focus_done=True→逐字符+回车(2 字符=2 CHAR+KEYDOWN+KEYUP)",
+      ok is True and w30.user32.calls == 4, "calls=%d" % w30.user32.calls)
+
+# 送达判据必须只认「user 角色 + text part」:续命文案会被工具记录/摘要原样引用
+T30DB = os.path.join(SCR, "t30-db.sqlite")
+if os.path.exists(T30DB):
+    os.remove(T30DB)
+con30 = sqlite3.connect(T30DB)
+con30.executescript(
+    "CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);"
+    "CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, "
+    "time_created INTEGER, data TEXT);"
+    "CREATE TABLE session_input(id TEXT PRIMARY KEY, session_id TEXT, kind TEXT, delivery TEXT, "
+    "payload TEXT, admitted_sequence INTEGER, promoted_sequence INTEGER, promoted_message_id TEXT, "
+    "status TEXT, status_reason TEXT, time_created INTEGER, time_updated INTEGER);")
+now30 = int(time.time() * 1000)
+quoted = json.dumps({"type": "tool", "input": {"command": "echo " + w30.MESSAGE}},
+                    ensure_ascii=False)
+con30.execute("INSERT INTO message VALUES('m1','sess_q',?,?)",
+              (now30, json.dumps({"role": "assistant"}, ensure_ascii=False)))
+con30.execute("INSERT INTO part VALUES('p1','m1','sess_q',?,?)", (now30, quoted))
+con30.execute("INSERT INTO message VALUES('m2','sess_u',?,?)",
+              (now30, json.dumps({"role": "user"}, ensure_ascii=False)))
+con30.execute("INSERT INTO part VALUES('p2','m2','sess_u',?,?)",
+              (now30, json.dumps({"type": "text", "text": w30.MESSAGE}, ensure_ascii=False)))
+con30.commit()
+con30.close()
+w30.DB_PATH = T30DB
+check("T30k 工具记录引用文案≠送达(只认 user)",
+      w30._db_delivery_seen("sess_q", now30 - 1000) is False)
+check("T30l 用户消息真含文案=送达", w30._db_delivery_seen("sess_u", now30 - 1000) is True)
+w30.DB_PATH = os.path.join(SCR, "no-such-db.sqlite")
+check("T30m 库不存在→核验返回 None(交回调用方降级)",
+      w30._db_delivery_seen("sess_u", now30) is None)
+
+# 审计词表:「未确认送达」必须能被 --audit 单独分类,而不是混进「已发送」
+T30LOG = os.path.join(SCR, "t30-watcher.log")
+with open(T30LOG, "w", encoding="utf-8") as fh:
+    fh.write("2026-10-10 00:58:45 ⚠ 续命未确认送达:已尝试 3 次,末次原因「注入已投递但会话未收到」,"
+             "需人工介入 (connection, sess_t30x)\n")
+    fh.write("2026-10-10 01:02:00 已自动发送并确认送达 '%s' (connection, sess_t30y)\n"
+             % w30.MESSAGE)
+acts30 = w30._parse_watcher_actions(T30LOG)
+kinds = [a[1] for a in acts30]
+check("T30n 审计词表:未确认送达→送达存疑,确认送达→发送",
+      kinds == ["送达存疑", "发送"], str(kinds))
+
+# ---- T31(2026-10-10):退出取证(遗言)——长驻进程必须能说出自己的死因 ----
+# 背景:当天第 4 次"静默死亡",查 Application 日志与 WER 均零条 python 记录(不是崩溃),
+# 而 Windows 对"关窗口 / Ctrl+C / 注销"本来就不写系统日志 → 只能由进程临死前自己留一句话。
+def t31_file_lines():
+    try:
+        with open(w30.LOG_FILE, encoding="utf-8") as fh:
+            return fh.read().splitlines()
+    except OSError:
+        return []
+
+
+RET31 = w30.console_ctrl_handler(0)
+lines31 = [l for l in t31_file_lines() if "监视器退出" in l]
+check("T31a 控制台 Ctrl+C 事件→留下遗言且仍按默认终止(返回 False)",
+      RET31 is False and len(lines31) == 1 and "Ctrl+C" in lines31[0],
+      lines31[0][-46:] if lines31 else "无遗言")
+
+w30.console_ctrl_handler(2)
+lines31 = [l for l in t31_file_lines() if "监视器退出" in l]
+check("T31b 关窗口事件→遗言点明「控制台窗口被关闭」(此前这条死法零痕迹)",
+      len(lines31) == 2 and "窗口被关闭" in lines31[1], lines31[-1][-40:] if lines31 else "无")
+
+w30.console_ctrl_handler(6)
+lines31 = [l for l in t31_file_lines() if "监视器退出" in l]
+check("T31c 关机/注销事件映射正确", "关机" in lines31[-1])
+
+n_before = len(t31_file_lines())
+w30.console_ctrl_handler(99)          # 未知事件码:不能崩,也要留痕
+check("T31d 未知控制台事件不崩且留痕",
+      len(t31_file_lines()) == n_before + 1 and "控制台事件 99" in t31_file_lines()[-1])
+
+try:
+    raise ValueError("t31-synthetic-boom")
+except ValueError:
+    w30._dump_traceback()
+tb31 = "\n".join(t31_file_lines())
+check("T31e 未捕获异常→traceback 整段落进日志(不只依赖控制台)",
+      "t31-synthetic-boom" in tb31 and "Traceback" in tb31)
+
+real_log30 = w30.LOG_FILE
+w30.LOG_FILE = os.path.join(SCR, "no-such-dir-t31", "x.log")
+try:
+    w30._note_exit("T31 不可写路径")   # 不可写时静默,绝不抛异常(取证不能反噬主流程)
+    ok31f = True
+except Exception:
+    ok31f = False
+check("T31f 日志不可写时取证静默失败(不抛异常)", ok31f)
+w30.LOG_FILE = real_log30
+
+# 审计词表:遗言要有自己的分类,否则「事件窗口内监视器挂了」会被误报成"处理链路异常"
+T31LOG = os.path.join(SCR, "t31-watcher.log")
+with open(T31LOG, "w", encoding="utf-8") as fh:
+    fh.write("2026-10-10 10:46:08 ⚠ 监视器退出: 控制台窗口被关闭(有人关了黑窗口) (PID 7072)\n")
+acts31 = w30._parse_watcher_actions(T31LOG)
+check("T31g 审计词表:遗言→「监视器退出」",
+      len(acts31) == 1 and acts31[0][1] == "监视器退出", str([a[1] for a in acts31]))
+
+# CLI 回归:--test-navigate 的解包口径(本轮 review 抓到 navigate_to_session 由 2 元组变 3 元组后
+# 该命令会 ValueError 崩掉,已修;这条测试把 CLI 全链锁住)
+_saved_argv31 = sys.argv
+w30.CHECK_UPDATES = False
+w30.find_zcode_hwnd = lambda: 12345
+w30.resolve_session_target = lambda sess: {"title": "t31", "project": "p", "time_updated": 0}
+NAV31 = []
+w30.navigate_to_session = lambda hwnd, target, sess: (NAV31.append(sess), (True, True, 0))[1]
+sys.argv = ["zcode_resume_watcher.py", "--test-navigate", "sess_t31"]
+code31 = None
+try:
+    w30.main()
+except SystemExit as e:
+    code31 = e.code
+except Exception as e:
+    code31 = "EXC:%s" % type(e).__name__
+finally:
+    sys.argv = _saved_argv31
+check("T31h --test-navigate 全链不炸(元组解包回归锁定)",
+      code31 == 0 and NAV31 == ["sess_t31"], "exit=%s" % code31)
+
+# ---- T32(2026-10-10):外部 review(第二轮)修复项全部锁死 ----
+# ①队列态也算"收到"(会话忙时输入先进 session_input,message 表里迟迟没有 → 旧核验会误判未送达并重发);
+# ②JSON 转义/畸形行都不许影响判读;③配置非法值(inf / 空正则 / 负数)回退默认;
+# ④草稿(6)/身份不明(7)是硬否决,NAV_FAIL_FALLBACK_SEND=true 也不许绕过;⑤身份不匹配不重试;
+# ⑥控制台回调不许 print(窗口关闭只给几秒宽限,print 可能被"快速编辑"选中卡住)。
+T32DB = os.path.join(SCR, "t32-db.sqlite")
+if os.path.exists(T32DB):
+    os.remove(T32DB)
+con32 = sqlite3.connect(T32DB)
+con32.executescript(
+    "CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);"
+    "CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, "
+    "time_created INTEGER, data TEXT);"
+    "CREATE TABLE session_input(id TEXT PRIMARY KEY, session_id TEXT, kind TEXT, delivery TEXT, "
+    "payload TEXT, admitted_sequence INTEGER, promoted_sequence INTEGER, promoted_message_id TEXT, "
+    "status TEXT, status_reason TEXT, time_created INTEGER, time_updated INTEGER);")
+now32 = int(time.time() * 1000)
+con32.execute("INSERT INTO session_input VALUES('q1','sess_q2','sendText','startNow',?,1,NULL,NULL,"
+              "'admitted',NULL,?,?)",
+              (json.dumps({"text": w30.MESSAGE}, ensure_ascii=False), now32, now32))
+con32.execute("INSERT INTO session_input VALUES('q2','sess_other','sendText','startNow',?,2,NULL,NULL,"
+              "'admitted',NULL,?,?)", (json.dumps({"text": "别的话"}, ensure_ascii=False), now32, now32))
+con32.execute("INSERT INTO message VALUES('m3','sess_esc',?,?)",
+              (now32, json.dumps({"role": "user"}, ensure_ascii=True)))
+con32.execute("INSERT INTO part VALUES('p3','m3','sess_esc',?,?)",
+              (now32, json.dumps({"type": "text", "text": w30.MESSAGE}, ensure_ascii=True)))
+con32.execute("INSERT INTO message VALUES('m4','sess_bad',?,?)", (now32, "[1,2]"))
+con32.execute("INSERT INTO part VALUES('p4','m4','sess_bad',?,?)", (now32, json.dumps([1, 2])))
+con32.execute("INSERT INTO message VALUES('m5','sess_bad',?,?)", (now32, ""))
+con32.execute("INSERT INTO part VALUES('p5','m5','sess_bad',?,?)", (now32, ""))
+con32.commit()
+con32.close()
+w30.DB_PATH = T32DB
+check("T32a 队列态(输入已入队、message 表尚无)也算收到→不再重发",
+      w30._db_delivery_seen("sess_q2", now32 - 1000) is True)
+check("T32b 队列里别人的话不影响判定", w30._db_delivery_seen("sess_other", now32 - 1000) is False)
+check("T32c JSON 转义存法(\\uXXXX)仍能判出送达", w30._db_delivery_seen("sess_esc", now32 - 1000) is True)
+check("T32d 畸形行(顶层非 dict/空串)不抛异常且判为未送达",
+      w30._db_delivery_seen("sess_bad", now32 - 1000) is False)
+
+T32CFG = os.path.join(SCR, "t32-config.json")
+with open(T32CFG, "w", encoding="utf-8") as fh:
+    json.dump({"deliver_check_timeout_seconds": float("inf"),
+               "composer_class_regex": "",
+               "resume_max_attempts": -5}, fh)
+w30.load_config(T32CFG)
+check("T32e 配置 inf / -5 / 空正则 → 全部回退默认(8s / 3 次 / min-h-10)",
+      w30.DELIVER_CHECK_TIMEOUT_SECONDS == 8.0 and w30.RESUME_MAX_ATTEMPTS == 3
+      and w30.COMPOSER_CLASS_REGEX == "min-h-10",
+      "timeout=%s attempts=%s composer=%r" % (w30.DELIVER_CHECK_TIMEOUT_SECONDS,
+                                              w30.RESUME_MAX_ATTEMPTS, w30.COMPOSER_CLASS_REGEX))
+w30.load_config()
+
+for _code in (6, 7):
+    w30.NAV_FAIL_FALLBACK_SEND = True
+    w30.DELIVER_CHECK_ENABLED = False      # 只看是否打字,绕过核验
+    del ATT30[:]
+    w30.navigate_to_session = lambda hwnd, target, sess, _c=_code: (False, False, _c)
+    w30.inject_text = lambda hwnd, text, focus_done=False: (ATT30.append(text), True)[1]
+    mark = len(LOG30)
+    r = w30.trigger_resume("connection", {"sessionId": "sess_t30"}, LiveArgs)
+    check("T32f 退出码 %d + fallback=true → 零注入(硬否决)" % _code,
+          r is False and len(ATT30) == 0 and any("不发送" in l for l in LOG30[mark:]))
+w30.NAV_FAIL_FALLBACK_SEND = False
+w30.DELIVER_CHECK_ENABLED = True
+
+
+class _FakeRun(object):
+    def __init__(self, code):
+        self.code = code
+        self.calls = 0
+    def __call__(self, *a, **kw):
+        self.calls += 1
+        class _R(object):
+            pass
+        r = _R()
+        r.returncode = self.code
+        return r
+
+
+_real_sub32 = w30.subprocess.run
+fake7 = _FakeRun(7)
+w30.subprocess.run = fake7
+ok32g = real_focus30()
+w30.subprocess.run = _real_sub32
+check("T32g 聚焦脚本退 7(身份不匹配)→只跑一次、直接放弃",
+      ok32g is False and fake7.calls == 1, "calls=%d" % fake7.calls)
+
+import builtins
+_real_print32 = builtins.print
+_before32h = len(t31_file_lines())
+
+
+def _boom_print(*a, **kw):
+    raise AssertionError("console handler must not print")
+
+
+builtins.print = _boom_print
+try:
+    ret32h = w30.console_ctrl_handler(2)
+    ok32h = True
+except Exception:
+    ok32h = False
+finally:
+    builtins.print = _real_print32
+check("T32h 控制台回调不打印、只落文件(窗口关闭的几秒宽限内必达)",
+      ok32h and ret32h is False and len(t31_file_lines()) == _before32h + 1)
+for _f in (T32DB, T32CFG):
+    try:
+        os.remove(_f)
+    except OSError:
+        pass
+
+# ---- T33(2026-10-10):第二轮外部评审(workflow 复核)确认的真 bug 全部锁死 ----
+# ①队列 payload 的 text 非字符串 → 旧实现 `MESSAGE in 5` 抛 TypeError 掀翻主循环;
+# ②config.json 顶层非对象 → cfg.get 抛 AttributeError,且发生在 run_watcher 的 try 之外;
+# ③attempts 传 2.9/inf → 旧实现静默取整或 OverflowError;④正则配置传数字 → TypeError;
+# ⑤事件 JSONL 顶层数组/标量被当事件 → 主循环 evt.get 崩。
+T33CFG = os.path.join(SCR, "t33-config.json")
+with open(T33CFG, "w", encoding="utf-8") as fh:
+    json.dump({"resume_max_attempts": 2.9, "composer_class_regex": 123}, fh)
+w30.load_config(T33CFG)
+check("T33a 配置 attempts=2.9(非整数)+正则=123(非字符串)→回退默认,不再静默取整/崩",
+      w30.RESUME_MAX_ATTEMPTS == 3 and w30.COMPOSER_CLASS_REGEX == "min-h-10",
+      "attempts=%s composer=%r" % (w30.RESUME_MAX_ATTEMPTS, w30.COMPOSER_CLASS_REGEX))
+with open(T33CFG, "w", encoding="utf-8") as fh:
+    fh.write("[1, 2, 3]")
+w30.load_config(T33CFG)
+check("T33b config.json 顶层是数组→不崩、保持默认", w30.RESUME_MAX_ATTEMPTS == 3)
+with open(T33CFG, "w", encoding="utf-8") as fh:
+    json.dump({"resume_max_attempts": 1e999, "deliver_check_timeout_seconds": 12.5,
+               "composer_class_regex": "abc-def", "deliver_check_enabled": False}, fh)
+w30.load_config(T33CFG)
+check("T33c inf 尝试次数→回退默认;合法非默认值确实生效(12.5s/abc-def/关核验)",
+      w30.RESUME_MAX_ATTEMPTS == 3 and w30.DELIVER_CHECK_TIMEOUT_SECONDS == 12.5
+      and w30.COMPOSER_CLASS_REGEX == "abc-def" and w30.DELIVER_CHECK_ENABLED is False,
+      "attempts=%s timeout=%s composer=%r enabled=%s" % (
+          w30.RESUME_MAX_ATTEMPTS, w30.DELIVER_CHECK_TIMEOUT_SECONDS,
+          w30.COMPOSER_CLASS_REGEX, w30.DELIVER_CHECK_ENABLED))
+w30.load_config()
+
+# 队列行 text 非字符串/畸形:不许抛异常,也不许误判送达
+T33DB = os.path.join(SCR, "t33-db.sqlite")
+if os.path.exists(T33DB):
+    os.remove(T33DB)
+con33 = sqlite3.connect(T33DB)
+con33.executescript(
+    "CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);"
+    "CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);"
+    "CREATE TABLE session_input(id TEXT PRIMARY KEY, session_id TEXT, kind TEXT, delivery TEXT, "
+    "payload TEXT, admitted_sequence INTEGER, promoted_sequence INTEGER, promoted_message_id TEXT, "
+    "status TEXT, status_reason TEXT, time_created INTEGER, time_updated INTEGER);")
+now33 = int(time.time() * 1000)
+for idx, bad in enumerate([json.dumps({"text": 5}), json.dumps({"text": [1, 2]}),
+                           json.dumps({"text": None}), json.dumps([1, 2]), "not-json"]):
+    con33.execute("INSERT INTO session_input VALUES(?,?, 'sendText','startNow',?,1,NULL,NULL,'admitted',NULL,?,?)",
+                  ("b%d" % idx, "sess_badq", bad, now33, now33))
+con33.commit()
+con33.close()
+w30.DB_PATH = T33DB
+ok33d = True
+try:
+    r33d = w30._db_delivery_seen("sess_badq", now33 - 1000)
+except Exception as e:
+    ok33d = False
+    r33d = "EXC:%s" % type(e).__name__
+check("T33d 队列 payload 的 text 非字符串(数字/数组/null)/非对象 → 不抛异常且不误判送达",
+      ok33d and r33d is False, "结果=%s" % r33d)
+
+# 事件 JSONL 顶层非 dict:只接字典事件
+t33 = w30.Tailer()
+T33LOG2 = os.path.join(SCR, "t33-events.jsonl")
+with open(T33LOG2, "w", encoding="utf-8") as fh:
+    fh.write("[1, 2]" + chr(10)
+             + json.dumps({"event": "turn.started", "sessionId": "sess_x"}) + chr(10)
+             + "42" + chr(10))
+t33.read_new(T33LOG2)                     # 首次打开从文件尾开始(冷启动不追溯)
+t33.offset = 0; t33.partial = b""         # 手动拉回开头,模拟"读到这三行"
+evts33 = t33.read_new(T33LOG2)
+check("T33e Tailer 只把 JSON 对象当事件(数组/标量行被丢弃)",
+      len(evts33) == 1 and isinstance(evts33[0], dict) and evts33[0].get("event") == "turn.started",
+      "n=%d" % len(evts33))
+
+# 真 wait_delivery(不用 mock):命中即返回 True;无命中等超时返回 False
+w30.DB_PATH = T33DB
+con33b = sqlite3.connect(T33DB)
+con33b.execute("INSERT INTO message VALUES('m33','sess_hit',?,?)", (now33, json.dumps({"role": "user"})))
+con33b.execute("INSERT INTO part VALUES('p33','m33','sess_hit',?,?)",
+               (now33, json.dumps({"type": "text", "text": w30.MESSAGE})))
+con33b.commit(); con33b.close()
+t0 = time.monotonic()
+hit33 = real_wait30("sess_hit", now33 - 1000)
+dt_hit = time.monotonic() - t0
+w30.DELIVER_CHECK_TIMEOUT_SECONDS = 0.6
+t0 = time.monotonic()
+miss33 = real_wait30("sess_miss", now33 - 1000)
+dt_miss = time.monotonic() - t0
+w30.DELIVER_CHECK_TIMEOUT_SECONDS = 0.0
+check("T33f 真 wait_delivery 接通 SQL 与轮询:命中立刻 True、无命中等满超时才 False",
+      hit33 is True and dt_hit < 0.5 and miss33 is False and 0.5 <= dt_miss < 3.0,
+      "hit=%.2fs miss=%.2fs" % (dt_hit, dt_miss))
+
+# 注册函数本身要真被调用(此前只测回调,没测注册);事件码 5(注销)也要覆盖
+_k32calls = []
+
+
+def _fake_sch(cb, add):
+    _k32calls.append((cb, add))
+    return 1
+
+
+class _FakeK32(object):
+    pass
+
+
+before33 = len(t31_file_lines())
+if w30.IS_WINDOWS:
+    fakek = _FakeK32()
+    fakek.SetConsoleCtrlHandler = _fake_sch  # 实例属性=普通函数:可挂 argtypes,与真实 ctypes 用法一致
+    real_k32 = w30.kernel32
+    w30.kernel32 = fakek
+    reg33 = w30.install_console_ctrl_logger()
+    w30.kernel32 = real_k32
+    expect_reg33 = True
+    kept33 = len(w30._CONSOLE_CTRL_CB) >= 1  # 回调被引用住(防 GC)
+else:
+    # 非 Windows:注册函数必须安全返回 False 且不触碰 kernel32(CI 三平台都要跑这个文件)
+    reg33 = w30.install_console_ctrl_logger()
+    expect_reg33 = False
+    kept33 = True
+w30.console_ctrl_handler(5)                  # 两个平台都覆盖事件码 5(注销)的映射与留痕
+check("T33g 控制台回调注册(Win:真注册进 kernel32 / 非 Win:安全返回 False)+事件码 5 有遗言",
+      reg33 is expect_reg33 and kept33 and len(t31_file_lines()) == before33 + 1
+      and "注销" in t31_file_lines()[-1],
+      "reg=%s calls=%d platform=%s" % (reg33, len(_k32calls), "win" if w30.IS_WINDOWS else "other"))
+
+# 注入链断言到参数级:目标句柄 + 两个字符按序 + 回车按下/抬起
+class _RecU32(object):
+    def __init__(self):
+        self.calls = []
+
+    def PostMessageW(self, hwnd, msg, wparam, lparam):
+        self.calls.append((hwnd, msg, wparam, lparam))
+        return 1
+
+
+w30.bring_to_front = lambda hwnd: True
+w30.uia_focus_input = lambda: True
+w30._focused_child_hwnd = lambda hwnd: 42
+rec33 = _RecU32()
+w30.user32 = rec33
+ok33h = real_inject30(7, "ab", focus_done=True)
+w30.user32 = real_user32_33 = None
+seq33 = [(c[0], c[1], c[2]) for c in rec33.calls]
+check("T33h 注入链参数级断言:同一句柄 2 个 WM_CHAR(按序)+回车按下/抬起",
+      ok33h is True and seq33 == [(42, 0x0102, ord("a")), (42, 0x0102, ord("b")),
+                                  (42, 0x0100, 0x0D), (42, 0x0101, 0x0D)],
+      str(seq33))
+
+# ps1 语法 + 纯 ASCII 闸门进套件(此前只有人工实测)
+ps33 = None
+_psh33 = "powershell" if w30.IS_WINDOWS else "pwsh"   # CI 的 ubuntu/macos runner 只有 pwsh
+_ps_ok33 = None
+_ev33 = ""
+try:
+    ps33 = subprocess.run([_psh33, "-NoProfile", "-Command",
+    "$errs=$null; foreach($f in @('" + PROJ.replace(chr(92), "/") + "/uia_focus_input.ps1','"
+    + PROJ.replace(chr(92), "/") + "/uia_navigate_input.ps1'))"
+    "{[System.Management.Automation.Language.Parser]::ParseFile($f,[ref]$null,[ref]$errs)|Out-Null;"
+    "$b=[System.IO.File]::ReadAllBytes($f); Write-Output ('x' + @($errs).Count + ' n' + @($b|Where-Object{$_ -gt 127}).Count)}"],
+        capture_output=True, text=True, timeout=120)
+    _out33 = ps33.stdout or ""
+    _ps_ok33 = (_out33.count("x0 n0") == 2)
+    _ev33 = _out33.strip()[:60]
+except FileNotFoundError:
+    _ps_ok33 = True
+    _ev33 = "skip: 本机没有 %s(编码闸门只在有 PowerShell 的机器上真跑)" % _psh33
+check("T33i 两个 ps1 语法零错误且保持纯 ASCII(编码纪律闸门)", _ps_ok33 is True, _ev33)
+
+for _f in (T33DB, T33CFG, T33LOG2):
+    try:
+        os.remove(_f)
+    except OSError:
+        pass
+
+# T30 组自清理:测试产物不留仓(gitignore 兜底,跑挂时也不会变成未跟踪噪音)
+for _f in (T30DB, T30LOG, os.path.join(SCR, "t30-exit.log"), T31LOG):
+    try:
+        os.remove(_f)
+    except OSError:
+        pass
 
 
 fails = [n for n, ok in PASS if not ok]
