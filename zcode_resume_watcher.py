@@ -63,7 +63,7 @@ if IS_WINDOWS:
     from ctypes import wintypes
 
 # ------------------------- 版本与更新源 -------------------------
-VERSION = "1.0.0"                     # 语义化版本,与 GitHub Releases tag(v前缀)比对
+VERSION = "1.1.0"                     # 语义化版本,与 GitHub Releases tag(v前缀)比对
 UPSTREAM_REPO = "JJ-Yvain/zcode-resume-watcher"   # --check-updates 查询的发布源
 CHECK_UPDATES = True                  # 启动时查询最新 release;仅日志提示,绝不自动更新
 MAC_APP_NAME = "ZCode"                # macOS 注入时激活的应用名(config: mac_app_name)
@@ -856,7 +856,9 @@ def _trigger_resume_macos(reason, evt, args):
     """macOS 触发链:检测与守卫(去重/熔断)与 Windows 同一套;发送前按
     NAVIGATE_ENABLED 走 mac 智能归位(db 反查标题→AX 找行点击→顶栏验证)。
     AX 可读但找不到/验证不到 → 宁可不发;AX 整体不可读(看不清界面)→
-    退回"激活当前会话"发送并大声记日志——宁可降级,不做哑巴工具。"""
+    退回"激活当前会话"发送并大声记日志——宁可降级,不做哑巴工具。
+    发送后**同样回库核验送达 + 未送达退避重试**(与 Windows 共用 wait_delivery/常量);
+    但 mac 侧没有输入框身份判据与草稿检测,且选择器阈值未真机校准——失败会明确报出来。"""
     sess = evt.get("sessionId") or ""
     if args.dry_run:
         if NAVIGATE_ENABLED:
@@ -866,24 +868,51 @@ def _trigger_resume_macos(reason, evt, args):
             detail = "归位:关"
         log("[dry-run] 将发送 '%s' (%s, %s, %s)" % (MESSAGE, reason, sess, detail))
         return False
-    if NAVIGATE_ENABLED:
-        target = resolve_session_target(sess)
-        if target is None:
-            log("mac 归位: DB 解析不到会话 %s,按当前会话直接发送" % sess)
-        else:
-            verified, blind = mac_navigate(target["title"])
-            if not verified and not blind:
-                log("按「宁可不发」策略放弃本次发送 (%s, %s)" % (reason, sess))
-                return False
-            if blind:
-                log("mac AX 不可读,退回发送到当前焦点会话 (%s, %s) "
-                    "-- 建议跑 --test-navigate %s 收集界面数据" % (reason, sess, sess))
-    sent = mac_inject_text(MESSAGE)
-    if sent:
-        log("已自动发送 '%s' (%s, %s)" % (MESSAGE, reason, sess))
-    else:
-        log("发送失败: 注入未被接受 (%s, %s)" % (reason, sess))
-    return sent
+    attempts = max(1, RESUME_MAX_ATTEMPTS if DELIVER_CHECK_ENABLED else 1)
+    last = ""
+    tried = 0
+    since_ms = time.time() * 1000.0   # 与 Windows 同款:核验原点 = 整次触发开头
+    for attempt in range(1, attempts + 1):
+        tried = attempt
+        tag = "第 %d/%d 次" % (attempt, attempts)
+        if NAVIGATE_ENABLED:
+            target = resolve_session_target(sess)
+            if target is None:
+                log("mac 归位: DB 解析不到会话 %s,按当前会话直接发送" % sess)
+            else:
+                verified, blind = mac_navigate(target["title"])
+                if not verified and not blind:
+                    last = "归位未成功(宁可不发)"
+                    log("%s 按「宁可不发」策略放弃本次发送 (%s, %s)" % (tag, reason, sess))
+                    if attempt < attempts:
+                        time.sleep(RESUME_RETRY_BACKOFF_SECONDS)
+                    continue
+                if blind:
+                    log("mac AX 不可读,退回发送到当前焦点会话 (%s, %s) "
+                        "-- 建议跑 --test-navigate %s 收集界面数据" % (reason, sess, sess))
+        if not mac_inject_text(MESSAGE):
+            last = "注入未被接受"
+            log("%s 发送失败: 注入未被接受 (%s, %s)" % (tag, reason, sess))
+            if attempt < attempts:
+                time.sleep(RESUME_RETRY_BACKOFF_SECONDS)
+            continue
+        if not DELIVER_CHECK_ENABLED:
+            log("已自动发送 '%s' (%s, %s;核验关闭)" % (MESSAGE, reason, sess))
+            return True
+        landed = wait_delivery(sess, since_ms)
+        if landed is True:
+            log("已自动发送并确认送达 '%s' (%s, %s)" % (MESSAGE, reason, sess))
+            return True
+        if landed is None:
+            log("已自动发送 '%s'(未核验:库 %s 读不到) (%s, %s)" % (MESSAGE, DB_PATH, reason, sess))
+            return True
+        last = "注入已投递但会话未收到"
+        log("%s %s (%s, %s)" % (tag, last, reason, sess))
+        if attempt < attempts:
+            time.sleep(RESUME_RETRY_BACKOFF_SECONDS)
+    log("⚠ 续命未确认送达:已尝试 %d 次,末次原因「%s」,需人工介入 (%s, %s)"
+        % (tried, last, reason, sess))
+    return False
 
 
 # ------------------------- 日志判定 -------------------------
