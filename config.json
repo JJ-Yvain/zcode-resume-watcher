@@ -24,8 +24,12 @@
   "nav_item_class_regex": "task-item",
   "nav_group_class_regex": "space-y-2",
   "nav_header_class_regex": "min-w-12",
+  "composer_class_regex": "min-h-10",
   "navigate_fail_fallback_send": false,
   "draft_check_enabled": true,
+  "deliver_check_enabled": true,
+  "deliver_check_timeout_seconds": 8.0,
+  "resume_max_attempts": 3,
   "trigger_mode": "broad",
   "exclude_error_causes": [
     "model_request_cancelled",

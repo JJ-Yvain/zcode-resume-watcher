@@ -43,6 +43,7 @@ import collections
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -50,6 +51,7 @@ import struct
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 
 # 平台判定:Windows 走 UIA+PostMessage,macOS 走 osascript(见 inject 分发);
@@ -89,8 +91,14 @@ DB_PATH = os.path.expanduser("~/.zcode/cli/db/db.sqlite")
 NAV_ITEM_CLASS_REGEX = "task-item"                     # 侧栏对话行的 UIA ClassName 特征
 NAV_GROUP_CLASS_REGEX = "space-y-2"                    # 项目分组头行特征(用于同名标题消歧)
 NAV_HEADER_CLASS_REGEX = "min-w-12"                    # 顶栏"当前会话标题"Text 行的 ClassName 特征
+COMPOSER_CLASS_REGEX = "min-h-10"                      # 聊天输入框的 UIA ClassName 特征(身份判据)
 NAV_FAIL_FALLBACK_SEND = False                         # 归位失败时:false=宁可不发 true=发给当前对话
 DRAFT_CHECK_ENABLED = True                             # 发送前检测输入框草稿,非空则放弃(防拼接污染)
+# ---- 送达核验与有界重试(2026-10-10 补:注入被丢弃却记为发送成功的静默漏洞) ----
+DELIVER_CHECK_ENABLED = True       # 注入后只读查 ZCode 库,确认续命消息真的落库
+DELIVER_CHECK_TIMEOUT_SECONDS = 8.0  # 单次核验等待上限(秒,轮询);实测落库 <1s,余量留给慢盘/大库
+RESUME_MAX_ATTEMPTS = 3            # 单次触发的发送尝试上限(含首次);=1 即退回"只发一次"旧行为
+RESUME_RETRY_BACKOFF_SECONDS = 2.0  # 两次尝试之间的等待(给会话切换/前端挂载留出时间,不设配置键)
 # ---- 全量接管(broad 触发模式)与熔断 ----
 TRIGGER_MODE = "broad"          # broad=所有 turn.failed 默认触发; whitelist=仅白名单错误码(旧行为)
 EXCLUDE_ERROR_CAUSES = (        # broad 模式按 cause.code 排除:用户取消/重试无解类
@@ -129,6 +137,8 @@ def load_config(path=None):
     global ROLLOUT_DIR, QUOTA_ENABLED, QUOTA_NEEDLES, QUOTA_RESET_REGEX
     global NAVIGATE_ENABLED, DB_PATH, NAV_ITEM_CLASS_REGEX, NAV_GROUP_CLASS_REGEX
     global NAV_HEADER_CLASS_REGEX, NAV_FAIL_FALLBACK_SEND, DRAFT_CHECK_ENABLED
+    global COMPOSER_CLASS_REGEX
+    global DELIVER_CHECK_ENABLED, DELIVER_CHECK_TIMEOUT_SECONDS, RESUME_MAX_ATTEMPTS
     global TRIGGER_MODE, EXCLUDE_ERROR_CAUSES, EXCLUDE_ERROR_CODES, CIRCUIT_BREAKER_LIMIT
     global QUOTA_STRUCTURAL_ENABLED, QUOTA_RESPONSEID_REGEX, QUOTA_TEXT_REGEX
     global JUDGE_ENABLED, JUDGE_ENDPOINT, JUDGE_MODEL, JUDGE_COOLDOWN_SECONDS, JUDGE_MAX_CHARS
@@ -142,6 +152,9 @@ def load_config(path=None):
             cfg = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         log("config.json 加载失败,使用默认值: %s" % e)
+        return
+    if not isinstance(cfg, dict):
+        log("config.json 顶层不是对象(实际 %s),使用默认值" % type(cfg).__name__)
         return
     MESSAGE = cfg.get("message", MESSAGE)
     POLL_SECONDS = cfg.get("poll_seconds", POLL_SECONDS)
@@ -164,8 +177,25 @@ def load_config(path=None):
                                                 NAV_GROUP_CLASS_REGEX, "nav_group_class_regex")
     NAV_HEADER_CLASS_REGEX = _compile_or_default(cfg.get("nav_header_class_regex", NAV_HEADER_CLASS_REGEX),
                                                  NAV_HEADER_CLASS_REGEX, "nav_header_class_regex")
+    COMPOSER_CLASS_REGEX = _compile_or_default(cfg.get("composer_class_regex") or COMPOSER_CLASS_REGEX,
+                                               COMPOSER_CLASS_REGEX, "composer_class_regex")
     NAV_FAIL_FALLBACK_SEND = bool(cfg.get("navigate_fail_fallback_send", NAV_FAIL_FALLBACK_SEND))
     DRAFT_CHECK_ENABLED = bool(cfg.get("draft_check_enabled", DRAFT_CHECK_ENABLED))
+    DELIVER_CHECK_ENABLED = bool(cfg.get("deliver_check_enabled", DELIVER_CHECK_ENABLED))
+    try:
+        _t = float(cfg.get("deliver_check_timeout_seconds", DELIVER_CHECK_TIMEOUT_SECONDS))
+        if not math.isfinite(_t) or _t < 0:
+            raise ValueError("非有限值/负数")
+        DELIVER_CHECK_TIMEOUT_SECONDS = _t
+    except (TypeError, ValueError):
+        log("配置 deliver_check_timeout_seconds 非有限非负数,回退默认 %s" % DELIVER_CHECK_TIMEOUT_SECONDS)
+    try:
+        _n = cfg.get("resume_max_attempts", RESUME_MAX_ATTEMPTS)
+        if isinstance(_n, bool) or not isinstance(_n, int) or _n < 1:
+            raise ValueError("必须是 >= 1 的整数")
+        RESUME_MAX_ATTEMPTS = _n
+    except (TypeError, ValueError, OverflowError):
+        log("配置 resume_max_attempts 非正整数或非整数(如 2.9/inf),回退默认 %d" % RESUME_MAX_ATTEMPTS)
     TRIGGER_MODE = cfg.get("trigger_mode", TRIGGER_MODE)
     EXCLUDE_ERROR_CAUSES = tuple(cfg.get("exclude_error_causes", list(EXCLUDE_ERROR_CAUSES)))
     EXCLUDE_ERROR_CODES = tuple(cfg.get("exclude_error_codes", list(EXCLUDE_ERROR_CODES)))
@@ -221,6 +251,70 @@ def log(msg):
             f.write(line + "\n")
     except OSError:
         pass
+
+
+# ------------------------- 退出取证(遗言) -------------------------
+# 2026-10-10:四次"静默死亡"全落在取证盲区——Windows 对"关窗口 / Ctrl+C / 注销关机"不写任何
+# 系统日志(已核 Application 日志与 WER:四次死亡日零条 python 记录),而进程自己退出时也不留话。
+# 补三件事:①控制台事件回调记下死因;②未捕获异常把 traceback 连同遗言写进 watcher.log;
+# ③启动行与心跳带 PID(日志里一眼对上进程)。**进程被强杀(任务管理器/Stop-Process -Force)仍无痕**。
+CONSOLE_CTRL_EVENTS = {0: "收到 Ctrl+C(控制台中断)", 1: "收到 Ctrl+Break",
+                       2: "控制台窗口被关闭(有人关了黑窗口)", 5: "系统注销", 6: "系统关机"}
+_CONSOLE_CTRL_CB = []          # 保持回调引用,防 ctypes 回调对象被 GC
+
+
+def _note_exit(reason, console=True):
+    """临死前把死因写进 watcher.log。**先落文件**,再(可选)打印。
+    控制台事件回调里必须 console=False:窗口关闭/注销只给几秒宽限,而 cmd 处于"快速编辑"
+    选中状态时 print 会一直阻塞,打完文件就赶紧交还系统(外部 review 2026-10-10 指出,复盘 P29)。
+    本函数绝不抛异常。"""
+    line = "%s ⚠ 监视器退出: %s (PID %d)" % (
+        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), reason, os.getpid())
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+    if not console:
+        return
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
+
+
+def _dump_traceback():
+    """把当前异常整段 traceback 追加进 watcher.log:控制台窗口可能被关掉,不能只依赖 stderr。"""
+    try:
+        tb = "%s ⚠ 监视器异常 traceback:\n%s" % (
+            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), traceback.format_exc())
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(tb + "\n")
+    except Exception:
+        pass
+
+
+def console_ctrl_handler(event):
+    """SetConsoleCtrlHandler 回调:记录事件后返回 False,让系统按默认行为终止进程(操作手感不变)。
+    回调跑在系统创建的控制线程里,只做"写一行文件"就交还,不打印、不做任何可能阻塞的事。"""
+    _note_exit(CONSOLE_CTRL_EVENTS.get(event, "控制台事件 %s" % event), console=False)
+    return False
+
+
+def install_console_ctrl_logger():
+    """注册控制台事件回调(仅 Windows)。失败静默忽略——取证是尽力而为,不许影响主流程。"""
+    if not IS_WINDOWS:
+        return False
+    try:
+        cb = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)(console_ctrl_handler)
+        kernel32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, wintypes.BOOL]
+        kernel32.SetConsoleCtrlHandler.restype = wintypes.BOOL
+        if kernel32.SetConsoleCtrlHandler(ctypes.cast(cb, ctypes.c_void_p), True):
+            _CONSOLE_CTRL_CB.append(cb)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _ver_tuple(s):
@@ -347,28 +441,43 @@ else:
         _fields_ = []
 
 
+FOCUS_VERDICTS = {1: "找不到 ZCode 窗口", 3: "界面树里没有可见输入框(会话切换中/被遮挡)",
+                  4: "输入框存在但 SetFocus 失败",
+                  7: "界面里的 Edit 不是聊天输入框(未识别,拒绝盲打字)"}
+
+
 def uia_focus_input():
     """用 UIA 把聊天输入框设为页面焦点(ZCode 输入框是 React 内容化编辑,
     页面无权焦时任何键盘注入都无效;UIA SetFocus 不依赖 SendInput)。
-    重试 3 次:Chromium 无障碍树懒初始化,应用刚启动后的首次查询可能返回空。"""
+    重试 3 次:Chromium 无障碍树懒初始化,应用刚启动后的首次查询可能返回空。
+    失败原因落日志——2026-10-10 的漏送正是「兜底聚焦失败被忽略 + 照常盲打字」造成的。"""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uia_focus_input.ps1")
     proc_name = os.path.splitext(WINDOW_EXE)[0]
+    code = None
     for attempt in range(3):
         try:
             r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                                "-File", script, "-ProcName", proc_name],
+                                "-File", script, "-ProcName", proc_name,
+                                "-ComposerClass", COMPOSER_CLASS_REGEX],
                                capture_output=True, timeout=15)
-            if r.returncode == 0:
+            code = r.returncode
+            if code == 0:
                 return True
-        except Exception:
-            pass
+            if code == 7:
+                break        # 身份规则不匹配是静态事实,重试不会变好,立刻收手(外部 review 指出)
+        except Exception as e:
+            code = -1
+            log("普通聚焦脚本执行异常: %s" % e)
         time.sleep(0.5)
+    if code is not None:
+        log("普通聚焦失败: %s(退出码 %s)" % (FOCUS_VERDICTS.get(code, "未知"), code))
     return False
 
 
 # ------------------------- 智能归位 -------------------------
 NAV_VERDICTS = {1: "窗口不可用", 2: "侧栏无唯一匹配行(未找到或歧义)", 3: "已点击但顶栏标题未在3秒内变为目标",
                 4: "界面树未就绪", 5: "已切换但无输入框", 6: "输入框有未发送草稿,为不污染原对话放弃发送",
+                7: "界面里的 Edit 未被识别为聊天输入框,拒绝盲打字",
                 10: "导航参数错误", -1: "导航脚本执行异常"}
 
 
@@ -377,8 +486,8 @@ def _compile_or_default(pattern, default, name):
     try:
         re.compile(pattern)
         return pattern
-    except re.error:
-        log("配置 %s 不是合法正则(%r),回退默认 %r" % (name, pattern, default))
+    except (re.error, TypeError):     # TypeError: 值不是字符串(如数字);同样视为非法 → 回退默认
+        log("配置 %s 不是合法正则或不是字符串(%r),回退默认 %r" % (name, pattern, default))
         return default
 
 
@@ -420,6 +529,74 @@ def resolve_session_target(sess):
             "time_updated": row[2]}
 
 
+def _db_delivery_seen(sess, since_ms):
+    """只读查 ZCode 库:since_ms 之后该会话是否**收到过**这条续命文案。
+    返回 True=已收到 / False=没有 / None=无法核验(库缺失或读取失败)。
+
+    两条独立通道都要查(2026-10-10 外部 review 指出,复盘 P29):
+    ① message+part:正常发送(session 空闲)会立刻落成 role=user 的 text part;
+    ② session_input:会话**正忙**时输入先入队(实测 status=admitted 行可长时间 promoted_message_id=NULL,
+       即 message 表里根本没有这条),只看 ① 会把"已入队"误判成"没送到"→ 重发改成双份。
+    两条都不做 SQL 侧字符串匹配:JSON 里可能存成 \\uXXXX 转义,子串匹配会静默漏;
+    时间窗内行数很少,先取回来在 Python 里解析、验类型、比文本,顺带把畸形行挡在外面。"""
+    con = _db_conn()
+    if con is None:
+        return None
+    lo = int(since_ms) - 2000
+    try:
+        rows = con.execute(
+            "SELECT m.data, p.data FROM part p JOIN message m ON m.id = p.message_id "
+            "WHERE p.session_id = ? AND p.time_created >= ? LIMIT 200",
+            (sess, lo)).fetchall()
+        queued = con.execute(
+            "SELECT payload FROM session_input WHERE session_id = ? AND time_created >= ? "
+            "AND kind = 'sendText' LIMIT 200", (sess, lo)).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    for mdata, pdata in rows:
+        try:
+            mrow = json.loads(mdata)
+            part = json.loads(pdata)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(mrow, dict) or mrow.get("role") != "user":
+            continue
+        if not isinstance(part, dict) or part.get("type") != "text":
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and MESSAGE in text:
+            return True
+    for (payload,) in queued:
+        try:
+            item = json.loads(payload)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and MESSAGE in text:   # 非字符串直接跳过:别让畸形行掀翻主循环
+            return True
+    return False
+
+
+def wait_delivery(sess, since_ms):
+    """轮询等待"库确认收到"(message 落库 或 输入已入队),以 ZCode 库为唯一送达判据。
+    True=已收到 / False=等待超时仍未收到 / None=核验不可用(库读不到,调用方退回旧语义)。
+    注入返回值为真只证明 WM_CHAR 进了消息队列,证明不了文字落到输入框——本函数是补上的第二只眼。
+    注意 since_ms 由调用方在**整次触发开头**给定,不是每次尝试各自计时:上一轮尝试迟到的落库
+    必须能被本轮核验看到,否则会重复发送(外部 review 2026-10-10 指出,复盘 P29)。"""
+    deadline = time.monotonic() + DELIVER_CHECK_TIMEOUT_SECONDS
+    while True:
+        landed = _db_delivery_seen(sess, since_ms)
+        if landed is None:
+            return None                      # 库不可用:立刻交回,不空等
+        if landed or time.monotonic() >= deadline:
+            return landed
+        time.sleep(0.5)
+
+
 def run_nav_script(target, dry=False):
     """执行 uia_navigate_input.ps1,返回其退出码(见 NAV_VERDICTS)。"""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uia_navigate_input.ps1")
@@ -430,6 +607,7 @@ def run_nav_script(target, dry=False):
             "-ItemClassRegex", NAV_ITEM_CLASS_REGEX,
             "-GroupClassRegex", NAV_GROUP_CLASS_REGEX,
             "-HeaderClassRegex", NAV_HEADER_CLASS_REGEX,
+            "-ComposerClassRegex", COMPOSER_CLASS_REGEX,
             "-Log", NAV_LOG]
     if dry:
         args.append("-DryRun")
@@ -444,14 +622,15 @@ def run_nav_script(target, dry=False):
 
 
 def navigate_to_session(hwnd, target, sess):
-    """把 ZCode 界面切到出错会话并验证。返回 (归位成功?, 脚本是否已聚焦输入框?)。
+    """把 ZCode 界面切到出错会话并验证。返回 (归位成功?, 脚本是否已聚焦输入框?, 退出码)。
     验证 oracle:顶栏标题 Text 变为目标 title(逐字相等,无时间后缀);若打开时顶栏已是
-    目标标题则视为"已在场",免点击直接聚焦。"""
+    目标标题则视为"已在场",免点击直接聚焦。
+    退出码交回调用方:6=输入框有草稿,重试无意义且不许覆盖(停止重试的直接依据)。"""
     if target is None:
         log("归位失败: DB 解析不到会话 %s 的标题" % sess)
-        return False, False
+        return False, False, None
     if not bring_to_front(hwnd):
-        return False, False
+        return False, False, None
     time.sleep(0.4)
     code = run_nav_script(target, dry=False)
     for _ in range(2):  # 界面树未就绪/窗口瞬时不可用:短暂重试(Chromium 懒建树;重试前重新置前)
@@ -462,25 +641,29 @@ def navigate_to_session(hwnd, target, sess):
         code = run_nav_script(target, dry=False)
     if code == 0:
         log("归位成功(顶栏标题验证): 「%s」" % target["title"])
-        return True, True
+        return True, True, code
     if code == 5:
         log("归位成功但脚本未见输入框,走普通聚焦: 「%s」" % target["title"])
-        return True, False
+        return True, False, code
     log("归位失败: %s 「%s」(详见 navigate.log)" % (NAV_VERDICTS.get(code, "退出码 %s" % code),
                                                     target["title"]))
-    return False, False
+    return False, False, code
 
 
 def inject_text(hwnd, text, focus_done=False):
     """置前 → UIA 聚焦输入框 → PostMessage 逐字符 WM_CHAR → 回车发送。
     focus_done=True 表示归位脚本已把页面焦点放到输入框,跳过普通聚焦步骤。
+    兜底聚焦失败时**不打字**(焦点不在输入框,WM_CHAR 会被丢弃或落到别处,
+    白记一次"发送成功"),交回调用方等待界面就绪后重试。
     全程不依赖 SendInput(本机 SendInput 在普通进程不可用,见 README)。"""
     if not bring_to_front(hwnd):
         log("注入失败: 窗口置前失败")
         return False
     time.sleep(0.4)
     if not focus_done:
-        uia_focus_input()
+        if not uia_focus_input():
+            log("注入取消: 输入框未就绪,不盲打字")
+            return False
         time.sleep(0.3)
     target = _focused_child_hwnd(hwnd)
     if not target:
@@ -1013,16 +1196,23 @@ class Tailer:
             if not line.strip():
                 continue
             try:
-                events.append(json.loads(line.decode("utf-8", "replace")))
+                obj = json.loads(line.decode("utf-8", "replace"))
             except ValueError:
-                pass
+                continue
+            if isinstance(obj, dict):      # 只接事件对象:数组/标量行不算事件(否则主循环 .get 会掀翻进程)
+                events.append(obj)
         return events
 
 
 # ------------------------- 触发发送 -------------------------
 def trigger_resume(reason, evt, args):
-    """执行一次续命发送。返回是否真正执行了发送(失败不计入熔断
-    只应在返回 True 时进行(归位失败/注入失败不算,保留后续报错的重试机会)。"""
+    """归位 → 注入 → **以库为准核验送达**,未送达则有界重试。
+    返回是否确认送达(未送达一律返回 False,不计入熔断,保留后续报错的重试机会)。
+
+    2026-10-10 修补:此前 inject_text 的返回值 = WM_CHAR 入队成功,与"文字进没进
+    输入框"无关。00:58:40 那次报错里输入框因会话切换/报错态短暂缺席,注入被整批
+    丢弃却记了"已自动发送",且事件已按 turnId 消费、之后无新事件——会话停摆 7h48m
+    直到人工补发。现在:输入框未就绪就不打字 + 落库核验 + 退避重试 + 失败大声记日志。"""
     if IS_MACOS:
         return _trigger_resume_macos(reason, evt, args)
     hwnd = find_zcode_hwnd()
@@ -1042,21 +1232,57 @@ def trigger_resume(reason, evt, args):
                                              NAV_VERDICTS.get(code, "退出码 %s" % code))
         log("[dry-run] 将发送 '%s' (%s, %s, %s)" % (MESSAGE, reason, sess, detail))
         return False
-    focus_done = False
-    if NAVIGATE_ENABLED:
-        ok, focus_done = navigate_to_session(hwnd, target, sess)
-        if not ok:
-            focus_done = False
-            if not NAV_FAIL_FALLBACK_SEND:
-                log("按「宁可不发」策略放弃本次发送 (%s, %s)" % (reason, sess))
-                return False
-            log("归位未成功,回退发送到当前对话 (%s, %s)" % (reason, sess))
-    sent = inject_text(hwnd, MESSAGE, focus_done=focus_done)
-    if sent:
-        log("已自动发送 '%s' (%s, %s)" % (MESSAGE, reason, sess))
-    else:
-        log("发送失败: 注入未被接受 (%s, %s)" % (reason, sess))
-    return sent
+    attempts = max(1, RESUME_MAX_ATTEMPTS if DELIVER_CHECK_ENABLED else 1)
+    last = ""
+    tried = 0
+    since_ms = time.time() * 1000.0   # 核验原点 = **整次触发**开头,不是每次尝试各自计时:
+                                      # 上一轮迟到的落库必须能被本轮看到,否则会重复发送
+    for attempt in range(1, attempts + 1):
+        tried = attempt
+        tag = "第 %d/%d 次" % (attempt, attempts)
+        focus_done = False
+        if NAVIGATE_ENABLED:
+            ok, focus_done, code = navigate_to_session(hwnd, target, sess)
+            if not ok:
+                focus_done = False
+                # 6(草稿)/7(身份不明)是硬否决:宁可不发,而且**连"回退当前对话"也不许绕过**——
+                # 回退路径不做草稿检测与身份识别,放它过去等于把"污染/盲打字"风险转嫁到别的对话
+                # (外部 review 2026-10-10 指出,复盘 P29)
+                if code == 6:
+                    last = "输入框有未发送草稿(不覆盖,稍后重试)"
+                elif code == 7:
+                    last = "界面里的 Edit 未被识别为聊天输入框(拒绝盲打字)"
+                elif not NAV_FAIL_FALLBACK_SEND:
+                    last = "归位未成功(宁可不发)"
+                if code in (6, 7) or not NAV_FAIL_FALLBACK_SEND:
+                    log("%s %s → 本次不发送 (%s, %s)" % (tag, last, reason, sess))
+                    if attempt < attempts:
+                        time.sleep(RESUME_RETRY_BACKOFF_SECONDS)
+                    continue
+                log("归位未成功,回退发送到当前对话 (%s, %s)" % (reason, sess))
+        if not inject_text(hwnd, MESSAGE, focus_done=focus_done):
+            last = "注入未执行(输入框未就绪/窗口不可用)"
+            log("%s %s (%s, %s)" % (tag, last, reason, sess))
+            if attempt < attempts:
+                time.sleep(RESUME_RETRY_BACKOFF_SECONDS)
+            continue
+        if not DELIVER_CHECK_ENABLED:
+            log("已自动发送 '%s' (%s, %s;核验关闭)" % (MESSAGE, reason, sess))
+            return True
+        landed = wait_delivery(sess, since_ms)
+        if landed is True:
+            log("已自动发送并确认送达 '%s' (%s, %s)" % (MESSAGE, reason, sess))
+            return True
+        if landed is None:
+            log("已自动发送 '%s'(未核验:库 %s 读不到) (%s, %s)" % (MESSAGE, DB_PATH, reason, sess))
+            return True
+        last = "注入已投递但会话未收到"
+        log("%s %s (%s, %s)" % (tag, last, reason, sess))
+        if attempt < attempts:
+            time.sleep(RESUME_RETRY_BACKOFF_SECONDS)
+    log("⚠ 续命未确认送达:已尝试 %d 次,末次原因「%s」,需人工介入 (%s, %s)"
+        % (tried, last, reason, sess))
+    return False
 
 
 def handle_event_failure(evt, st, args):
@@ -1194,9 +1420,12 @@ def run_watcher(args):
     tailer = Tailer()
     rollout_tailers = {}
     st = WatchState()
-    log("监视器启动 (平台: %s, 轮询 %ss, %s, 额度监听: %s, 智能归位: %s, 触发: %s, 熔断: %d, 停滞: %s, 心跳: %s)" % (
+    forensic = install_console_ctrl_logger()
+    if forensic:
+        log("退出取证已启用(控制台事件回调:关窗口/Ctrl+C/注销/关机都会留遗言), PID %d" % os.getpid())
+    log("监视器启动 (平台: %s, PID %d, 轮询 %ss, %s, 额度监听: %s, 智能归位: %s, 触发: %s, 熔断: %d, 停滞: %s, 心跳: %s)" % (
         "Windows" if IS_WINDOWS else ("macOS" if IS_MACOS else sys.platform),
-        args.interval, "dry-run" if args.dry_run else "live",
+        os.getpid(), args.interval, "dry-run" if args.dry_run else "live",
         "开" if QUOTA_ENABLED else "关",
         ("开," + ("宁可不发" if not NAV_FAIL_FALLBACK_SEND else "失败回退当前对话"))
         if NAVIGATE_ENABLED else "关",
@@ -1238,7 +1467,8 @@ def run_watcher(args):
         if STALL_ENABLED:
             check_stalls(st, args)
         if HEARTBEAT_MINUTES > 0 and time.monotonic() - last_heartbeat >= HEARTBEAT_MINUTES * 60:
-            log("心跳: 监视器运行中 (近 %d 分钟无动作,空闲轮询)" % HEARTBEAT_MINUTES)
+            log("心跳: 监视器运行中 (近 %d 分钟无动作,空闲轮询, PID %d)"
+                % (HEARTBEAT_MINUTES, os.getpid()))
             last_heartbeat = time.monotonic()
         time.sleep(args.interval)
 
@@ -1288,10 +1518,12 @@ def once_mode(args):
 # ------------------------- 覆盖审计(--audit) -------------------------
 AUDIT_ACTION_KINDS = (
     ("已自动发送", "发送"),
+    ("未确认送达", "送达存疑"),
     ("熔断中", "熔断跳过"),
     ("按「宁可不发」策略放弃", "归位放弃"), ("归位失败", "归位失败"), ("归位存疑", "归位存疑"),
     ("发送失败", "注入失败"), ("发送未完成", "额度未登记"),
     ("检测到 provider", "额度检出"), ("监视器启动", "启动"), ("心跳:", "心跳"),
+    ("监视器退出", "监视器退出"),   # 遗言:审计据此报"事件窗口内监视器挂了",而不是"处理链路异常"
     ("config.json 已加载", "配置行"),
 )
 # 错误报文候选的宽预筛(启发式,可能有误报;报告里只是"候选"供人工复核)。
@@ -1485,7 +1717,8 @@ def audit_mode(args):
             stats["已发送"] += 1
             continue
         skip = [a for a in win if a[1] in ("熔断跳过", "归位放弃", "归位失败",
-                                           "归位存疑", "注入失败", "额度未登记")]
+                                           "归位存疑", "注入失败", "额度未登记", "送达存疑",
+                                           "监视器退出")]
         if skip:
             stats[skip[0][1]] += 1
         elif win:
@@ -1682,8 +1915,9 @@ def main():
             sys.exit(2)
         print("目标: 「%s」 项目=%s time_updated=%s" % (
             target["title"], target["project"], target["time_updated"]), flush=True)
-        ok, focused = navigate_to_session(hwnd, target, sess)
-        print("归位结果: %s (导航脚本已聚焦输入框=%s)" % ("成功" if ok else "失败", focused), flush=True)
+        ok, focused, code = navigate_to_session(hwnd, target, sess)
+        print("归位结果: %s (导航脚本已聚焦输入框=%s, 退出码=%s)"
+              % ("成功" if ok else "失败", focused, code), flush=True)
         if ok and not focused:
             print("普通聚焦补偿结果:", uia_focus_input(), flush=True)
         sys.exit(0 if ok else 3)
@@ -1701,7 +1935,15 @@ def main():
         time.sleep(10)
         print("发送结果: %s" % inject_text(hwnd, MESSAGE), flush=True)
         return
-    run_watcher(args)
+    try:
+        run_watcher(args)
+    except KeyboardInterrupt:
+        _note_exit("收到 Ctrl+C(SIGINT)")
+        raise
+    except Exception as exc:
+        _note_exit("未捕获异常 %s: %s(完整 traceback 见下)" % (type(exc).__name__, exc))
+        _dump_traceback()
+        raise
 
 
 if __name__ == "__main__":

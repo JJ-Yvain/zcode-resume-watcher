@@ -11,6 +11,10 @@
 #   4 no task rows visible (accessibility tree not ready yet) - retriable
 #   5 navigation verified but no Edit found (caller should run plain focus script)
 #   6 input box has a non-empty draft (checked only with -DraftCheck); message NOT typed
+#   7 focused Edit is not the chat composer (class mismatch) - caller must NOT type
+#   Notes: 3 also covers InvokePattern failure (not only "header did not change"), and 5 also
+#   covers SetFocus failing on a found Edit. -DryRun exits 0 as soon as exactly one candidate
+#   row is found: it never clicks and never verifies, so 0 there means "would try", not "verified".
 param(
   [string]$ProcName = 'ZCode',
   [string]$TitleCP = '',
@@ -18,6 +22,7 @@ param(
   [string]$ItemClassRegex = 'task-item',
   [string]$GroupClassRegex = 'space-y-2',
   [string]$HeaderClassRegex = 'min-w-12',
+  [string]$ComposerClassRegex = 'min-h-10',
   [string]$Log = '',
   [switch]$DryRun,
   [switch]$DraftCheck
@@ -57,11 +62,20 @@ if ($null -eq $proc) { LogLine 'NOPROC'; exit 1 }
 $root = [System.Windows.Automation.AutomationElement]::RootElement
 $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $proc.Id)
 $wins = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
-$main = $null
+# Window pick: finite rects only (a minimized Chromium window reports an infinite rect),
+# prefer width > 800 (skip the 250x64 alias mini-window), then fall back to the largest area so a
+# user-narrowed window is not a hard failure - the header/focus verification still decides.
+$main = $null; $bestArea = -1.0; $fallback = $null; $fallbackArea = -1.0
 for ($w = 0; $w -lt $wins.Count; $w++) {
-  if ($wins.Item($w).Current.BoundingRectangle.Width -gt 800) { $main = $wins.Item($w) }
+  $e = $wins.Item($w); $r = $e.Current.BoundingRectangle
+  if ([double]::IsNaN($r.Width) -or [double]::IsInfinity($r.Width) -or
+      [double]::IsNaN($r.Height) -or [double]::IsInfinity($r.Height)) { continue }
+  $area = $r.Width * $r.Height
+  if (($r.Width -gt 800) -and ($area -gt $bestArea)) { $bestArea = $area; $main = $e }
+  if ($area -gt $fallbackArea) { $fallbackArea = $area; $fallback = $e }
 }
-if ($null -eq $main) { LogLine 'NOWIN'; exit 1 }
+if ($null -eq $main) { $main = $fallback }
+if ($null -eq $main) { LogLine 'NOWIN (no finite window rect; minimized?)'; exit 1 }
 
 function Collect {
   $all = $main.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
@@ -125,18 +139,50 @@ function HeaderTitle {
   return ''
 }
 $script:FocusedEdit = $null
+$script:FocusedIsComposer = $false
+$script:ComposerRuleBroken = $false
 function FocusBottomEdit {
   $editCond = New-Object System.Windows.Automation.PropertyCondition(
     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
     [System.Windows.Automation.ControlType]::Edit)
   $edits = $main.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCond)
   if ($edits.Count -eq 0) { return $false }
-  $target = $null; $bestY = -1
-  for ($i = 0; $i -lt $edits.Count; $i++) {
-    $y = $edits.Item($i).Current.BoundingRectangle.Y
-    if ($y -gt $bestY) { $bestY = $y; $target = $edits.Item($i) }
+  # Identity first, position second. Right after a session switch the tree holds extra Edits:
+  # plugin-panel inputs (URL / viewport, often NON-EMPTY) and offscreen leftovers. A naive
+  # "bottom-most visible Edit" can therefore pick a panel field, and the draft check then reads
+  # THAT value and blocks the resume (measured 2026-10-10 10:13:26: panel URL read as "draft").
+  # Pass 1: visible+focusable Edit whose class matches the composer signature -> that is the chat
+  # input box, OK to focus AND to draft-check. Pass 2 (fallback): visible+focusable bottom-most,
+  # focused but flagged as NOT the composer -> caller must not type / must not trust the draft read.
+  $target = $null; $bestY = $null; $isComposer = $false
+  $hasIdentityRule = ($ComposerClassRegex -ne '')
+  try {
+    foreach ($pass in 1, 2) {
+      # No identity rule = no way to tell the composer apart -> never claim identity (fail closed)
+      if ($pass -eq 1 -and (-not $hasIdentityRule)) { continue }
+      for ($i = 0; $i -lt $edits.Count; $i++) {
+        $e = $edits.Item($i)
+        if ($e.Current.IsOffscreen -or (-not $e.Current.IsKeyboardFocusable)) { continue }
+        if ($pass -eq 1 -and ($e.Current.ClassName -notmatch $ComposerClassRegex)) { continue }
+        $y = $e.Current.BoundingRectangle.Y
+        # $null sentinel, not -1: monitors left of / above the primary give negative coordinates
+        if ($null -eq $bestY -or $y -gt $bestY) { $bestY = $y; $target = $e; $isComposer = ($pass -eq 1) }
+      }
+      if ($null -ne $target) { break }
+    }
+  } catch {
+    # UIA property read / stale element / invalid regex -> "not identified", never type
+    $target = $null
+    $isComposer = $false
+    $script:ComposerRuleBroken = $true
   }
-  try { $target.SetFocus(); $script:FocusedEdit = $target; return $true } catch { return $false }
+  if ($null -eq $target) { return $false }
+  try {
+    $target.SetFocus()
+    $script:FocusedEdit = $target
+    $script:FocusedIsComposer = $isComposer
+    return $true
+  } catch { return $false }
 }
 # True when the input box carries no draft. Measured empty state is a single newline
 # (Value/TextPattern both readable on this React contenteditable), hence Trim().
@@ -147,7 +193,12 @@ function DraftLooksEmpty {
   try {
     $vp = [System.Windows.Automation.ValuePattern]$script:FocusedEdit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
     $v = $vp.Current.Value
-  } catch { return $true }
+  } catch {
+    # Read channel unavailable -> degrade to "empty" (never block sending) but SAY SO in the log,
+    # so a UI change that kills the draft check is visible instead of silent (review 2026-10-10).
+    LogLine 'DRAFT-READ-UNAVAILABLE ValuePattern (treated as empty, never blocks)'
+    return $true
+  }
   $t = ''
   try {
     $tp = [System.Windows.Automation.TextPattern]$script:FocusedEdit.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
@@ -171,7 +222,8 @@ if ($DryRun) {
 
 if ($pre -eq $title) {
   LogLine 'ALREADY-ACTIVE (header equals title)'
-  if (-not (FocusBottomEdit)) { exit 5 }
+  if (-not (FocusBottomEdit)) { if ($script:ComposerRuleBroken) { LogLine 'COMPOSER-RULE-BROKEN'; exit 7 } ; exit 5 }
+  if (-not $script:FocusedIsComposer) { LogLine 'COMPOSER-NOT-IDENTIFIED'; exit 7 }
   if ($DraftCheck -and -not (DraftLooksEmpty)) { LogLine 'DRAFT-NONEMPTY abort (already-active path)'; exit 6 }
   exit 0
 }
@@ -194,7 +246,8 @@ if (-not $verified) {
   exit 3
 }
 LogLine 'HEADER-VERIFIED'
-if (-not (FocusBottomEdit)) { exit 5 }
+if (-not (FocusBottomEdit)) { if ($script:ComposerRuleBroken) { LogLine 'COMPOSER-RULE-BROKEN'; exit 7 } ; exit 5 }
+if (-not $script:FocusedIsComposer) { LogLine 'COMPOSER-NOT-IDENTIFIED'; exit 7 }
 if ($DraftCheck -and -not (DraftLooksEmpty)) { LogLine 'DRAFT-NONEMPTY abort'; exit 6 }
 LogLine 'NAV-OK input focused'
 exit 0
