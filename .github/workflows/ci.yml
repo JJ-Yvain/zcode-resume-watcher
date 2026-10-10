@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
-      - name: Synthetic regression (99 checks, no real messages sent)
+      - name: Synthetic regression (104 checks, no real messages sent)
         run: python tests/driver.py
       - name: CLI smoke (--version / --check-updates)
         env:

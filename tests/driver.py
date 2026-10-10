@@ -2,7 +2,7 @@
 """zcode-resume-watcher 合成回归测试(不发送、不碰真实日志)。
 覆盖:额度"假成功"三级判别(T1-T13,T18-T20)、broad 全量接管/黑名单/熔断/停滞(T14-T17,T21)、
 覆盖审计 --audit 机制(T22-T25)、上下文压缩自指误报(T29)、送达核验+有界重试+输入框身份判据(T30)、
-退出取证(遗言,T31)、外部评审确认的输入/配置形状防御(T32-T33)。
+退出取证(遗言,T31)、外部评审确认的输入/配置形状防御(T32-T33)、macOS 触发链同款核验(T34)。
 三平台 CI 都会跑本文件:平台相关断言分 Win / 非 Win 两支,ps1 编码闸门在无 PowerShell 的机器上显式跳过。
 运行: python driver.py   → 全 PASS 退出码 0。"""
 import datetime
@@ -1048,6 +1048,84 @@ for _f in (T33DB, T33CFG, T33LOG2):
         os.remove(_f)
     except OSError:
         pass
+
+# ---- T34(2026-10-10):macOS 触发链同样接入送达核验 + 有界重试 ----
+# 同类漏洞:此前 mac_inject_text 返回真即记「已自动发送」,从不核验 —— 与 Windows 修掉的假成功同源。
+# mac 原语(osascript/AX)在本机不可跑,故全部 mock;核验走**真** wait_delivery + 临时库。
+T34DB = os.path.join(SCR, "t34-db.sqlite")
+if os.path.exists(T34DB):
+    os.remove(T34DB)
+con34 = sqlite3.connect(T34DB)
+con34.executescript(
+    "CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);"
+    "CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);"
+    "CREATE TABLE session_input(id TEXT PRIMARY KEY, session_id TEXT, kind TEXT, delivery TEXT, "
+    "payload TEXT, admitted_sequence INTEGER, promoted_sequence INTEGER, promoted_message_id TEXT, "
+    "status TEXT, status_reason TEXT, time_created INTEGER, time_updated INTEGER);")
+now34 = int(time.time() * 1000)
+con34.execute("INSERT INTO message VALUES('m34','sess_mac_ok',?,?)",
+              (now34, json.dumps({"role": "user"})))
+con34.execute("INSERT INTO part VALUES('p34','m34','sess_mac_ok',?,?)",
+              (now34, json.dumps({"type": "text", "text": w30.MESSAGE})))
+con34.commit()
+con34.close()
+
+_saved34 = (w30.IS_MACOS, w30.NAVIGATE_ENABLED, w30.DB_PATH,
+            w30.DELIVER_CHECK_TIMEOUT_SECONDS, w30.RESUME_RETRY_BACKOFF_SECONDS)
+w30.IS_MACOS = True                     # 让 trigger_resume 走 mac 分支(所有 mac 原语都被 mock)
+w30.NAVIGATE_ENABLED = False            # 先测最小链:注入 + 核验
+w30.DB_PATH = T34DB
+w30.DELIVER_CHECK_TIMEOUT_SECONDS = 0.0
+w30.RESUME_RETRY_BACKOFF_SECONDS = 0.0
+w30.wait_delivery = real_wait30         # 显式用真核验(t30_run 留下的 mock 会假装送达)
+MAC34 = []
+w30.mac_inject_text = lambda text: (MAC34.append(text), True)[1]
+w30.mac_navigate = lambda title: (True, False)
+
+mark = len(LOG30)
+r = w30.trigger_resume("connection", {"sessionId": "sess_mac_ok"}, LiveArgs)
+check("T34a mac:注入后回库核验送达→True 且只注入一次、记「确认送达」",
+      r is True and len(MAC34) == 1 and any("确认送达" in l for l in LOG30[mark:]))
+
+del MAC34[:]
+mark = len(LOG30)
+r = w30.trigger_resume("connection", {"sessionId": "sess_mac_miss"}, LiveArgs)
+check("T34b mac:未送达→重试到上限、显式「未确认送达」(不再记假成功)",
+      r is False and len(MAC34) == 3 and any("未确认送达" in l for l in LOG30[mark:])
+      and not any("已自动发送" in l for l in LOG30[mark:]))
+
+# 归位分支:AX 可读但验证不到 → 宁可不发(零注入);AX 不可读 → 降级发送但同样核验
+w30.NAVIGATE_ENABLED = True
+w30.mac_navigate = lambda title: (False, False)
+del MAC34[:]
+r = w30.trigger_resume("connection", {"sessionId": "sess_mac_ok"}, LiveArgs)
+check("T34c mac:归位已验证失败→宁可不发(零注入)", r is False and len(MAC34) == 0)
+
+w30.mac_navigate = lambda title: (False, True)     # AX 整体不可读 → 降级当前会话
+del MAC34[:]
+mark = len(LOG30)
+r = w30.trigger_resume("connection", {"sessionId": "sess_mac_ok"}, LiveArgs)
+check("T34d mac:AX 不可读→仍降级发送,但同样要核验送达",
+      r is True and len(MAC34) == 1 and any("AX 不可读" in l for l in LOG30[mark:])
+      and any("确认送达" in l for l in LOG30[mark:]))
+
+# 重试后成功:第一次未送达、第二次已送达(mock 核验序列)
+w30.NAVIGATE_ENABLED = False
+_seq34 = iter([False, True])
+w30.wait_delivery = lambda sess, since_ms: next(_seq34, True)
+del MAC34[:]
+mark = len(LOG30)
+r = w30.trigger_resume("connection", {"sessionId": "sess_mac_x"}, LiveArgs)
+check("T34e mac:首次未送达→重试一次即送达(注入两次,与 Windows 同款语义)",
+      r is True and len(MAC34) == 2 and any("确认送达" in l for l in LOG30[mark:]))
+
+(w30.IS_MACOS, w30.NAVIGATE_ENABLED, w30.DB_PATH,
+ w30.DELIVER_CHECK_TIMEOUT_SECONDS, w30.RESUME_RETRY_BACKOFF_SECONDS) = _saved34
+w30.wait_delivery = real_wait30
+try:
+    os.remove(T34DB)
+except OSError:
+    pass
 
 # T30 组自清理:测试产物不留仓(gitignore 兜底,跑挂时也不会变成未跟踪噪音)
 for _f in (T30DB, T30LOG, os.path.join(SCR, "t30-exit.log"), T31LOG):
