@@ -366,7 +366,7 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
 
   <dl class="specs">
     <div><dt>主脚本</dt><dd>1979<span>行 Python</span></dd></div>
-    <div><dt>UIA 脚本</dt><dd>330<span>行 PowerShell</span></dd></div>
+    <div><dt>UIA 脚本</dt><dd>347<span>行 PowerShell</span></dd></div>
     <div><dt>配置项</dt><dd>40<span>键</span></dd></div>
     <div><dt>归位退出码</dt><dd>7<span>种</span></dd></div>
     <div><dt>归位失败</dt><dd>0<span>生产期</span></dd></div>
@@ -567,7 +567,7 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
     <thead><tr><th>文件</th><th>规模</th><th>职责</th></tr></thead>
     <tbody>
       <tr><td>zcode_resume_watcher.py</td><td>1979 行</td><td>全部感知 / 判定 / 守卫 / 归位调度 / 注入 / 送达核验 / 退出取证 / 审计。纯标准库加 ctypes，单文件。</td></tr>
-      <tr><td>uia_navigate_input.ps1</td><td>253 行</td><td>侧栏定位点击、顶栏标题验证、草稿读取、输入框聚焦（只认可见、可聚焦且 class 匹配聊天输入框特征的 Edit）。纯 ASCII，中文用码点串传参。</td></tr>
+      <tr><td>uia_navigate_input.ps1</td><td>270 行</td><td>侧栏定位点击、顶栏标题验证、草稿读取、输入框聚焦（只认可见、可聚焦且 class 匹配聊天输入框特征的 Edit）。纯 ASCII，中文用码点串传参。</td></tr>
       <tr><td>uia_focus_input.ps1</td><td>77 行</td><td>兜底聚焦：归位未走到输入框时，独立把底部 Edit 设为焦点；跳过离屏/不可聚焦节点；识别不出聊天输入框就报 7，拒绝盲打字。</td></tr>
       <tr><td>config.json</td><td>40 键</td><td>消息文本、两个日志源、黑名单、阈值、正则、送达核验与重试、判官端点全部可调。</td></tr>
       <tr><td>启动自动续命.bat</td><td>—</td><td>双击常驻。带 Python 自动引导：已装则直接用，没装则从 python.org 拉绿色便携版到用户目录，不碰注册表与 PATH。</td></tr>

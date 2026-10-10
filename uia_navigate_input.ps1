@@ -187,6 +187,23 @@ function FocusBottomEdit {
 # True when the input box carries no draft. Measured empty state is a single newline
 # (Value/TextPattern both readable on this React contenteditable), hence Trim().
 # If the read patterns are unavailable we degrade to "empty" (never block sending).
+function NotComposerHint {
+  # When no chat composer is found, look for an "answer/approval" shaped input: it means the
+  # session is waiting for its HUMAN, not dead. Sending the resume phrase as an answer would
+  # pollute the conversation, so this only adds a diagnostic hint - the verdict stays exit 7.
+  $editCond = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Edit)
+  $edits = $main.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCond)
+  for ($i = 0; $i -lt $edits.Count; $i++) {
+    $e = $edits.Item($i)
+    if ($e.Current.IsOffscreen) { continue }
+    if ($e.Current.ClassName -match 'min-h-16|resize-none') {
+      return ' (looks like an ANSWER/approval box - this session may be waiting for YOU, not dead)'
+    }
+  }
+  return ''
+}
 function DraftLooksEmpty {
   if ($null -eq $script:FocusedEdit) { return $true }
   $v = ''
@@ -223,7 +240,7 @@ if ($DryRun) {
 if ($pre -eq $title) {
   LogLine 'ALREADY-ACTIVE (header equals title)'
   if (-not (FocusBottomEdit)) { if ($script:ComposerRuleBroken) { LogLine 'COMPOSER-RULE-BROKEN'; exit 7 } ; exit 5 }
-  if (-not $script:FocusedIsComposer) { LogLine 'COMPOSER-NOT-IDENTIFIED'; exit 7 }
+  if (-not $script:FocusedIsComposer) { LogLine ('COMPOSER-NOT-IDENTIFIED' + (NotComposerHint)); exit 7 }
   if ($DraftCheck -and -not (DraftLooksEmpty)) { LogLine 'DRAFT-NONEMPTY abort (already-active path)'; exit 6 }
   exit 0
 }
