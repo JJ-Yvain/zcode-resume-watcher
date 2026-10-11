@@ -32,7 +32,7 @@ ZCode 里跑长任务时，两类失败会让任务悄悄死掉，人却未必�
   - 事件日志：捕获 `turn.failed` 显性失败（broad 模式，未知新错误类型也默认覆盖）；
   - 模型 IO 日志：捕获"假成功"隐形失败（特征串 + 错误信封结构双重判别，provider 无关，可选 LLM 判官兜底）。
 - **全量触发 ≠ 什么都发**：两类情况永不打扰——①用户主动取消/暂停（优先级最高）②黑名单"重试无解"类；其余失败自动续命。
-- **智能归位**（Windows）：发送前把界面切回出错的会话本身——sessionId 反查会话标题 → 侧栏定位点击 → 顶栏标题逐字验证 → 输入框有草稿则放弃（宁可不发，绝不错发到别的对话）。
+- **智能归位**（Windows）：发送前把界面切回出错的会话本身——sessionId 反查会话标题 → 侧栏定位点击 → 顶栏标题逐字验证 → 输入框有草稿则放弃（宁可不发，绝不错发到别的对话）。聚焦后会**回读真实焦点核验落地**（`SetFocus` 可能被静默忽略，而按键跟着真实焦点走），焦点没落在聊天输入框上就拒发。
 - **覆盖审计** `--audit`：只读扫描历史日志，报告"哪些中断没被续命到"（区分监视器没在跑 vs 规则没覆盖），以及悬空 turn、新报错形态候选——扩面的日常入口。
 - **更新检查** `--check-updates`：查询本仓库最新 Release 提示新版本（只提示不自动更新，可配置关闭）。
 - **交互式架构页**：`architecture.html` 单文件直开，11 个可点击场景演示信号管线与守卫语义，含无头自检钩子。
@@ -124,7 +124,7 @@ python zcode_resume_watcher.py --version            # 当前版本
 ## 相关链接
 
 - [architecture.html](architecture.html) — 交互式架构页（信号管线 / 11 场景 / 守卫语义）
-- [tests/driver.py](tests/driver.py) — 57 项合成回归（`python tests/driver.py`，CI 在 Windows/macOS/Linux 三平台运行）
+- [tests/driver.py](tests/driver.py) — 111 项合成回归（`python tests/driver.py`，CI 在 Windows/macOS/Linux 三平台运行）
 
 ## License
 

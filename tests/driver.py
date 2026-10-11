@@ -2,7 +2,8 @@
 """zcode-resume-watcher 合成回归测试(不发送、不碰真实日志)。
 覆盖:额度"假成功"三级判别(T1-T13,T18-T20)、broad 全量接管/黑名单/熔断/停滞(T14-T17,T21)、
 覆盖审计 --audit 机制(T22-T25)、上下文压缩自指误报(T29)、送达核验+有界重试+输入框身份判据(T30)、
-退出取证(遗言,T31)、外部评审确认的输入/配置形状防御(T32-T33)、macOS 触发链同款核验(T34)。
+退出取证(遗言,T31)、外部评审确认的输入/配置形状防御(T32-T33)、macOS 触发链同款核验(T34)、
+焦点落地核验(SetFocus 被忽略时拒绝盲打字,T35)。
 三平台 CI 都会跑本文件:平台相关断言分 Win / 非 Win 两支,ps1 编码闸门在无 PowerShell 的机器上显式跳过。
 运行: python driver.py   → 全 PASS 退出码 0。"""
 import datetime
@@ -1126,6 +1127,117 @@ try:
     os.remove(T34DB)
 except OSError:
     pass
+
+# ---- T35(2026-10-11):焦点落地核验 —— SetFocus 被静默忽略时绝不盲打字 ----
+# 用户实测:续命文字被打进浏览器面板的**网址输入框**与**自由尺寸视口宽高框**。链路:身份判据
+# 只保证"选谁",不保证 SetFocus 真把焦点落到它身上;而 PostMessage 的 WM_CHAR 跟着**真实焦点**
+# 走。修法:两个 ps1 都在 SetFocus 后回读 AutomationElement.FocusedElement 核验落地(退 8),
+# Python 侧把 8 与 6/7 同级硬否决,\-\-test-send 人工试用也留档。本组只测编排与静态闸门。
+check("T35a 退出码 8 有中文释义(聚焦脚本/归位脚本两侧)",
+      "焦点" in w30.FOCUS_VERDICTS.get(8, "") and "焦点" in w30.NAV_VERDICTS.get(8, ""),
+      "focus=%r nav=%r" % (w30.FOCUS_VERDICTS.get(8), w30.NAV_VERDICTS.get(8)))
+
+_saved35 = (w30.NAV_FAIL_FALLBACK_SEND, w30.DELIVER_CHECK_ENABLED, w30.RESUME_MAX_ATTEMPTS,
+            w30.RESUME_RETRY_BACKOFF_SECONDS)
+w30.NAV_FAIL_FALLBACK_SEND = True          # 故意打开回退:8 仍必须是硬否决
+w30.DELIVER_CHECK_ENABLED = True           # 保持重试链(N 次失败才收口),注入为零与核验无关
+w30.RESUME_MAX_ATTEMPTS = 3
+w30.RESUME_RETRY_BACKOFF_SECONDS = 0.0
+del ATT30[:]
+w30.navigate_to_session = lambda hwnd, target, sess: (False, False, 8)
+w30.inject_text = lambda hwnd, text, focus_done=False: (ATT30.append(text), True)[1]
+mark = len(LOG30)
+r = w30.trigger_resume("connection", {"sessionId": "sess_t35"}, LiveArgs)
+lg = LOG30[mark:]
+check("T35b 归位退 8(焦点没落地)+fallback=true → 零注入、重试到上限、日志点明拒盲打字",
+      r is False and len(ATT30) == 0 and any("焦点未落到聊天输入框" in l for l in lg)
+      and any("已尝试 3 次" in l for l in lg), str(lg[-1:]))
+
+# 关键回归:focus_done=True(归位脚本已聚焦)也必须重新核验 —— 旧实现直接跳过聚焦,
+# 焦点在谁身上就把 WM_CHAR 打给谁(正是"打进面板输入框"的那条路)
+w30.bring_to_front = lambda hwnd: True
+w30.uia_focus_input = lambda: False
+fake35 = FakeU32()
+w30.user32 = fake35
+ok35c = real_inject30(1, "ab", focus_done=True)
+check("T35c focus_done=True 仍先核验:核验不过→零注入", ok35c is False and fake35.calls == 0)
+
+w30.uia_focus_input = lambda: True
+rec35 = _RecU32()
+w30.user32 = rec35
+w30._focused_child_hwnd = lambda hwnd: 42
+ok35d = real_inject30(1, "ab", focus_done=True)
+check("T35d 核验通过→照常逐字符投递(2 CHAR+回车按下/抬起)",
+      ok35d is True and len(rec35.calls) == 4, "calls=%d" % len(rec35.calls))
+
+
+class _FakeRun35(object):
+    def __init__(self, code, out=b"", err=b""):
+        self.code = code
+        self.out = out
+        self.err = err
+        self.calls = 0
+
+    def __call__(self, *a, **kw):
+        self.calls += 1
+
+        class _R(object):
+            pass
+        r = _R()
+        r.returncode = self.code
+        r.stdout = self.out
+        r.stderr = self.err
+        return r
+
+
+_real_sub35 = w30.subprocess.run
+fake35b = _FakeRun35(7, out=b"CANDIDATES not-composer total=3 visibleFocusable=2 "
+                                 b"[y=858 cls=min-h-10 alt] [y=120 cls=h-8 rounded-full]")
+w30.subprocess.run = fake35b
+mark = len(LOG30)
+ok35e = real_focus30()
+w30.subprocess.run = _real_sub35
+check("T35e 聚焦脚本失败→CANDIDATES 候选清单随日志落盘(拒绝可解释、只跑一次)",
+      ok35e is False and fake35b.calls == 1 and any("CANDIDATES" in l for l in LOG30[mark:]),
+      str(LOG30[mark:]))
+
+# --test-send(人工试用)要留档:过去无论成功还是打偏都不写日志,试用结果事后无从复盘
+_saved_argv35 = sys.argv
+_saved_sleep35 = time.sleep
+w30.CHECK_UPDATES = False
+w30.find_zcode_hwnd = lambda: 12345
+del ATT30[:]
+w30.inject_text = lambda hwnd, text, focus_done=False: (ATT30.append(text), True)[1]
+time.sleep = lambda s: None
+sys.argv = ["zcode_resume_watcher.py", "--test-send"]
+mark = len(LOG30)
+code35 = "?"
+try:
+    w30.main()
+    code35 = None
+except SystemExit as e:
+    code35 = e.code
+finally:
+    sys.argv = _saved_argv35
+    time.sleep = _saved_sleep35
+check("T35f --test-send 留档:开始与结果两行都进 watcher.log",
+      code35 is None and len(ATT30) == 1
+      and any("测试发送(人工触发)" in l for l in LOG30[mark:])
+      and any("测试发送结果" in l for l in LOG30[mark:]), "exit=%s %s" % (code35, LOG30[mark:]))
+
+# ps1 静态闸门:两个脚本必须真带落地核验与候选清单(防漏改/回退);语法与 ASCII 由 T33i 管
+_ps35 = {}
+for _f in ("uia_focus_input.ps1", "uia_navigate_input.ps1"):
+    try:
+        _txt = open(os.path.join(PROJ, _f), encoding="utf-8").read()
+    except OSError:
+        _txt = ""
+    _ps35[_f] = ("FocusedElement" in _txt) and ("exit 8" in _txt) and ("CANDIDATES" in _txt)
+check("T35g 两个 ps1 都带焦点落地核验 + 候选清单 + 退出码 8",
+      all(_ps35.values()), str(_ps35))
+
+w30.NAV_FAIL_FALLBACK_SEND, w30.DELIVER_CHECK_ENABLED, w30.RESUME_MAX_ATTEMPTS, \
+    w30.RESUME_RETRY_BACKOFF_SECONDS = _saved35
 
 # T30 组自清理:测试产物不留仓(gitignore 兜底,跑挂时也不会变成未跟踪噪音)
 for _f in (T30DB, T30LOG, os.path.join(SCR, "t30-exit.log"), T31LOG):

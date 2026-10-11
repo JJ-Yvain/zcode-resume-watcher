@@ -365,10 +365,10 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
   <p class="lede">双日志源感知 → 双通道判定 + 三重守卫 → 归位到出错会话后注入。纯 Python 标准库与 ctypes，不装任何第三方包，全程不依赖 SendInput。Windows 全功能；macOS 实验版（v1.5：AX 智能归位 + osascript 注入）。</p>
 
   <dl class="specs">
-    <div><dt>主脚本</dt><dd>1979<span>行 Python</span></dd></div>
-    <div><dt>UIA 脚本</dt><dd>347<span>行 PowerShell</span></dd></div>
+    <div><dt>主脚本</dt><dd>2009<span>行 Python</span></dd></div>
+    <div><dt>UIA 脚本</dt><dd>491<span>行 PowerShell</span></dd></div>
     <div><dt>配置项</dt><dd>40<span>键</span></dd></div>
-    <div><dt>归位退出码</dt><dd>7<span>种</span></dd></div>
+    <div><dt>归位退出码</dt><dd>10<span>种</span></dd></div>
     <div><dt>归位失败</dt><dd>0<span>生产期</span></dd></div>
   </dl>
 </header>
@@ -470,7 +470,7 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
         <li><b>草稿检测</b><span>输入框有未发送草稿就放弃——否则续命消息会拼在草稿后面一起发出去，污染对话。</span><span class="mono">空态实测为单个换行符，必须 trim 后判空</span></li>
       </ol>
       <div class="exits">
-        <p><b>0</b> 验证通过并聚焦　<b>2</b> 无唯一匹配行　<b>3</b> 顶栏 3 秒内未变　<b>4</b> 界面树未就绪（可重试）<br><b>5</b> 已切换但没找到输入框　<b>6</b> 有草稿，放弃发送　<b>10</b> 参数错误</p>
+        <p><b>0</b> 验证通过并聚焦　<b>2</b> 无唯一匹配行　<b>3</b> 顶栏 3 秒内未变　<b>4</b> 界面树未就绪（可重试）<br><b>5</b> 已切换但没找到输入框　<b>6</b> 有草稿，放弃发送　<b>7</b> 输入框身份不明　<b>8</b> 焦点未落地（拒发）　<b>10</b> 参数错误</p>
       </div>
     </div>
 
@@ -479,13 +479,13 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
       <div class="fn">inject_text · 全程 PostMessage，不用 SendInput</div>
       <ol class="steps">
         <li><b>窗口置前</b><span>AttachThreadInput 绕过前台锁定；ZCode 有多个同名窗口，取面积最大的那个（悬浮小窗会被跳过）。</span><span class="mono">find_zcode_hwnd → bring_to_front</span></li>
-        <li><b>输入框抢占页面焦点</b><span>React contenteditable 没有页面焦点时，任何按键注入都是无效的；只认"可见且可聚焦"的 Edit（切换瞬间树里会残留离屏节点，谁最靠下就选谁会被隐藏节点骗到）；聚焦失败就不打字，等界面就绪后重来——盲打字的整批按键会被静默丢弃。</span><span class="mono">uia_focus_input.ps1 · SetFocus</span></li>
+        <li><b>输入框抢占页面焦点</b><span>React contenteditable 没有页面焦点时，任何按键注入都是无效的；只认"可见且可聚焦"的 Edit（切换瞬间树里会残留离屏节点，谁最靠下就选谁会被隐藏节点骗到）；聚焦失败就不打字，等界面就绪后重来——盲打字的整批按键会被静默丢弃。<b>聚焦后还要回读 FocusedElement 核验落地</b>：SetFocus 可能被静默忽略，而 WM_CHAR 跟着真实焦点走（否则续命文字会落进浏览器面板的地址栏 / 自由尺寸视口宽高框）。</span><span class="mono">uia_focus_input.ps1 · SetFocus → FocusedElement</span></li>
         <li><b>逐字符投递</b><span>每字符 WM_CHAR 间隔约 20ms。UIA 写值、WM_PASTE、SendInput 三条路都实测无效。</span><span class="mono">0x0102</span></li>
         <li><b>回车发送</b><span>WM_KEYDOWN / WM_KEYUP 带正确扫描码，否则被忽略。</span><span class="mono">VK 0x0D · scan 0x1C</span></li>
         <li><b>回库核验送达</b><span>只读查 db.sqlite 的 message / part，确认这句话作为用户消息真的进了该会话；核验不过就重新归位再发，最多 3 次，仍不过就记一条显式失败等人接手。</span><span class="mono">deliver_check_enabled · resume_max_attempts</span></li>
       </ol>
       <div class="exits">
-        <p><b>0</b> 聚焦成功　<b>1</b> 无窗口　<b>3</b> 界面树里没有输入框（可重试）　<b>4</b> SetFocus 失败<br>本机普通进程 SendInput 一律返回错误码 87（环境级拦截），因此整条注入链刻意不依赖它——<br>在 SendInput 正常的机器上这套照常工作，只是用不上那条路。</p>
+        <p><b>0</b> 聚焦成功（含落地核验）　<b>1</b> 无窗口　<b>3</b> 界面树里没有输入框（可重试）　<b>4</b> SetFocus 失败<br><b>7</b> 身份不明　<b>8</b> 焦点未落地（两者都拒绝打字，可重试）<br>本机普通进程 SendInput 一律返回错误码 87（环境级拦截），因此整条注入链刻意不依赖它——<br>在 SendInput 正常的机器上这套照常工作，只是用不上那条路。</p>
       </div>
     </div>
   </div>
@@ -566,9 +566,9 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
   <table class="files">
     <thead><tr><th>文件</th><th>规模</th><th>职责</th></tr></thead>
     <tbody>
-      <tr><td>zcode_resume_watcher.py</td><td>1979 行</td><td>全部感知 / 判定 / 守卫 / 归位调度 / 注入 / 送达核验 / 退出取证 / 审计。纯标准库加 ctypes，单文件。</td></tr>
-      <tr><td>uia_navigate_input.ps1</td><td>270 行</td><td>侧栏定位点击、顶栏标题验证、草稿读取、输入框聚焦（只认可见、可聚焦且 class 匹配聊天输入框特征的 Edit）。纯 ASCII，中文用码点串传参。</td></tr>
-      <tr><td>uia_focus_input.ps1</td><td>77 行</td><td>兜底聚焦：归位未走到输入框时，独立把底部 Edit 设为焦点；跳过离屏/不可聚焦节点；识别不出聊天输入框就报 7，拒绝盲打字。</td></tr>
+      <tr><td>zcode_resume_watcher.py</td><td>2009 行</td><td>全部感知 / 判定 / 守卫 / 归位调度 / 注入 / 送达核验 / 退出取证 / 审计。纯标准库加 ctypes，单文件。</td></tr>
+      <tr><td>uia_navigate_input.ps1</td><td>342 行</td><td>侧栏定位点击、顶栏标题验证、草稿读取、输入框聚焦（只认可见、可聚焦且 class 匹配聊天输入框特征的 Edit）；聚焦后回读 FocusedElement 核验落地，没落地报 8；身份失败打 CANDIDATES 候选清单。纯 ASCII，中文用码点串传参。</td></tr>
+      <tr><td>uia_focus_input.ps1</td><td>149 行</td><td>兜底聚焦：归位未走到输入框时，独立把底部 Edit 设为焦点；跳过离屏/不可聚焦节点；识别不出聊天输入框报 7、焦点没落地报 8，一律拒绝盲打字。</td></tr>
       <tr><td>config.json</td><td>40 键</td><td>消息文本、两个日志源、黑名单、阈值、正则、送达核验与重试、判官端点全部可调。</td></tr>
       <tr><td>启动自动续命.bat</td><td>—</td><td>双击常驻。带 Python 自动引导：已装则直接用，没装则从 python.org 拉绿色便携版到用户目录，不碰注册表与 PATH。</td></tr>
       <tr><td>测试发送.bat</td><td>—</td><td>10 秒倒计时后试发一条，用来验证注入链是否通。</td></tr>
@@ -580,7 +580,7 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
 </main>
 
 <footer class="wrap wrap--wide">
-  本页是 2026-09-11 代码状态的只读快照，随代码演进可能过时。<br>
+  本页是 2026-10-11 代码状态的只读快照，随代码演进可能过时。<br>
   想核对实时事实：<code>python zcode_resume_watcher.py --audit --days 7</code> 会按当前 config 重算一遍。
 </footer>
 
@@ -611,7 +611,7 @@ var STAGES=[
   {nm:'判定', sb:'双通道规则',   tip:'classify_failure（事件日志）/ classify_modelio（模型 IO 三级）'},
   {nm:'守卫', sb:'去重·熔断',   tip:'同 turn/requestId 去重；同会话连续 5 次未恢复即熔断，turn.completed 复位（无时间冷却）'},
   {nm:'归位', sb:'验证后聚焦',   tip:'db 反查标题 → 侧栏点击 → 顶栏标题验证 → 草稿检测；没找到输入框就不打字'},
-  {nm:'注入', sb:'WM_CHAR',      tip:'置前 → UIA SetFocus → 逐字符 WM_CHAR → 回车'},
+  {nm:'注入', sb:'WM_CHAR',      tip:'置前 → UIA SetFocus（回读 FocusedElement 核验落地）→ 逐字符 WM_CHAR → 回车'},
   {nm:'发送', sb:'消息落地',     tip:'「任务意外中断，请继续！」进入该对话输入框并发送，再回库核验真的进了该会话；核验不过重试，仍不过记显式失败'}
 ];
 

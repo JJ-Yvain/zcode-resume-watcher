@@ -63,7 +63,7 @@ if IS_WINDOWS:
     from ctypes import wintypes
 
 # ------------------------- 版本与更新源 -------------------------
-VERSION = "1.1.0"                     # 语义化版本,与 GitHub Releases tag(v前缀)比对
+VERSION = "1.1.1"                     # 语义化版本,与 GitHub Releases tag(v前缀)比对
 UPSTREAM_REPO = "JJ-Yvain/zcode-resume-watcher"   # --check-updates 查询的发布源
 CHECK_UPDATES = True                  # 启动时查询最新 release;仅日志提示,绝不自动更新
 MAC_APP_NAME = "ZCode"                # macOS 注入时激活的应用名(config: mac_app_name)
@@ -443,17 +443,33 @@ else:
 
 FOCUS_VERDICTS = {1: "找不到 ZCode 窗口", 3: "界面树里没有可见输入框(会话切换中/被遮挡)",
                   4: "输入框存在但 SetFocus 失败",
-                  7: "界面里的 Edit 不是聊天输入框(未识别,拒绝盲打字)"}
+                  7: "界面里的 Edit 不是聊天输入框(未识别,拒绝盲打字)",
+                  8: "聚焦未落地(焦点被别的控件/应用占着,拒绝盲打字)"}
+
+
+def _proc_text(x):
+    """子进程输出归一成一段短文本:bytes→utf-8;None/别的形状→空串(测试替身可能不带该字段)。"""
+    if x is None:
+        return ""
+    if isinstance(x, bytes):
+        return x.decode("utf-8", "replace").strip()
+    return str(x).strip()
 
 
 def uia_focus_input():
     """用 UIA 把聊天输入框设为页面焦点(ZCode 输入框是 React 内容化编辑,
     页面无权焦时任何键盘注入都无效;UIA SetFocus 不依赖 SendInput)。
+    脚本内做**焦点落地核验**(回读 FocusedElement 确认焦点真在聊天输入框上)——
+    2026-10-11 实测漏点:SetFocus 被静默忽略时,续命文字会跟着真实焦点打进浏览器面板
+    的网址框/视口宽高框。
     重试 3 次:Chromium 无障碍树懒初始化,应用刚启动后的首次查询可能返回空。
-    失败原因落日志——2026-10-10 的漏送正是「兜底聚焦失败被忽略 + 照常盲打字」造成的。"""
+    失败原因落日志——2026-10-10 的漏送正是「兜底聚焦失败被忽略 + 照常盲打字」造成的;
+    失败时的候选 Edit 清单由脚本打在 stdout,这里一并落进 watcher.log。
+    退出码 7/8 是静态事实(身份不匹配/焦点没落地),重试不会变好,立刻收手(外部 review)。"""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uia_focus_input.ps1")
     proc_name = os.path.splitext(WINDOW_EXE)[0]
     code = None
+    detail = ""
     for attempt in range(3):
         try:
             r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -463,14 +479,18 @@ def uia_focus_input():
             code = r.returncode
             if code == 0:
                 return True
-            if code == 7:
-                break        # 身份规则不匹配是静态事实,重试不会变好,立刻收手(外部 review 指出)
+            outs = [_proc_text(getattr(r, "stdout", None)),
+                    _proc_text(getattr(r, "stderr", None))]
+            detail = "｜".join(x for x in outs if x)[:400]
+            if code in (7, 8):
+                break
         except Exception as e:
             code = -1
             log("普通聚焦脚本执行异常: %s" % e)
         time.sleep(0.5)
     if code is not None:
-        log("普通聚焦失败: %s(退出码 %s)" % (FOCUS_VERDICTS.get(code, "未知"), code))
+        log("普通聚焦失败: %s(退出码 %s)%s" % (FOCUS_VERDICTS.get(code, "未知"), code,
+                                              ("｜" + detail) if detail else ""))
     return False
 
 
@@ -478,6 +498,7 @@ def uia_focus_input():
 NAV_VERDICTS = {1: "窗口不可用", 2: "侧栏无唯一匹配行(未找到或歧义)", 3: "已点击但顶栏标题未在3秒内变为目标",
                 4: "界面树未就绪", 5: "已切换但无输入框", 6: "输入框有未发送草稿,为不污染原对话放弃发送",
                 7: "界面里的 Edit 未被识别为聊天输入框,拒绝盲打字",
+                8: "焦点未落到聊天输入框(SetFocus 被忽略),拒绝盲打字",
                 10: "导航参数错误", -1: "导航脚本执行异常"}
 
 
@@ -651,20 +672,20 @@ def navigate_to_session(hwnd, target, sess):
 
 
 def inject_text(hwnd, text, focus_done=False):
-    """置前 → UIA 聚焦输入框 → PostMessage 逐字符 WM_CHAR → 回车发送。
-    focus_done=True 表示归位脚本已把页面焦点放到输入框,跳过普通聚焦步骤。
-    兜底聚焦失败时**不打字**(焦点不在输入框,WM_CHAR 会被丢弃或落到别处,
+    """置前 → UIA 聚焦输入框(含焦点落地核验) → PostMessage 逐字符 WM_CHAR → 回车发送。
+    focus_done 只表示"归位脚本已经聚焦过";打字前一律**重新聚焦并核验一次**——SetFocus 可能
+    被静默忽略,而 WM_CHAR 跟着真实焦点走(2026-10-11 实测:续命文字打进浏览器面板输入框)。
+    兜底聚焦失败或焦点未落地时**不打字**(WM_CHAR 会被丢弃或落到别处,
     白记一次"发送成功"),交回调用方等待界面就绪后重试。
     全程不依赖 SendInput(本机 SendInput 在普通进程不可用,见 README)。"""
     if not bring_to_front(hwnd):
         log("注入失败: 窗口置前失败")
         return False
     time.sleep(0.4)
-    if not focus_done:
-        if not uia_focus_input():
-            log("注入取消: 输入框未就绪,不盲打字")
-            return False
-        time.sleep(0.3)
+    if not uia_focus_input():     # focus_done 不再跳过:核验必须紧贴打字之前
+        log("注入取消: 输入框未就绪或焦点未落地,不盲打字")
+        return False
+    time.sleep(0.3)
     target = _focused_child_hwnd(hwnd)
     if not target:
         log("注入失败: 找不到焦点控件")
@@ -1274,16 +1295,18 @@ def trigger_resume(reason, evt, args):
             ok, focus_done, code = navigate_to_session(hwnd, target, sess)
             if not ok:
                 focus_done = False
-                # 6(草稿)/7(身份不明)是硬否决:宁可不发,而且**连"回退当前对话"也不许绕过**——
-                # 回退路径不做草稿检测与身份识别,放它过去等于把"污染/盲打字"风险转嫁到别的对话
-                # (外部 review 2026-10-10 指出,复盘 P29)
+                # 6(草稿)/7(身份不明)/8(焦点没落地)是硬否决:宁可不发,而且**连"回退当前对话"
+                # 也不许绕过**——回退路径不做草稿检测与身份识别,放它过去等于把"污染/盲打字"
+                # 风险转嫁到别的对话(外部 review 2026-10-10 指出,复盘 P29;8 为 2026-10-11 补)
                 if code == 6:
                     last = "输入框有未发送草稿(不覆盖,稍后重试)"
                 elif code == 7:
                     last = "界面里的 Edit 未被识别为聊天输入框(拒绝盲打字)"
+                elif code == 8:
+                    last = "焦点未落到聊天输入框(拒绝盲打字)"
                 elif not NAV_FAIL_FALLBACK_SEND:
                     last = "归位未成功(宁可不发)"
-                if code in (6, 7) or not NAV_FAIL_FALLBACK_SEND:
+                if code in (6, 7, 8) or not NAV_FAIL_FALLBACK_SEND:
                     log("%s %s → 本次不发送 (%s, %s)" % (tag, last, reason, sess))
                     if attempt < attempts:
                         time.sleep(RESUME_RETRY_BACKOFF_SECONDS)
@@ -1954,15 +1977,22 @@ def main():
         if IS_MACOS:
             print("macOS 测试发送 '%s' (Ctrl+C 取消;需先授权辅助功能权限)" % MESSAGE, flush=True)
             time.sleep(3)
-            print("发送结果: %s" % mac_inject_text(MESSAGE), flush=True)
+            ok = mac_inject_text(MESSAGE)
+            log("测试发送(macOS,人工触发): %s" % ("已投递(未核验送达)" if ok else "未投递"))
+            print("发送结果: %s" % ok, flush=True)
             return
         hwnd = find_zcode_hwnd()
         if hwnd is None:
             print("找不到 ZCode 窗口", flush=True)
             sys.exit(1)
+        # 人工试用也留档:过去 --test-send 无论成功还是打偏都不写日志,试用结果事后无从复盘(2026-10-11)
+        log("=== 测试发送(人工触发): 10 秒后向当前会话投递 '%s' ===" % MESSAGE)
         print("找到 ZCode 窗口 %s,10 秒后测试发送 '%s' (Ctrl+C 取消)" % (hwnd, MESSAGE), flush=True)
         time.sleep(10)
-        print("发送结果: %s" % inject_text(hwnd, MESSAGE), flush=True)
+        ok = inject_text(hwnd, MESSAGE)
+        log("测试发送结果: %s" % ("WM_CHAR 已投递(未核验送达;请在目标会话里核对)"
+                                  if ok else "未投递(输入框未就绪/焦点未落地,原因见上一行)"))
+        print("发送结果: %s" % ok, flush=True)
         return
     try:
         run_watcher(args)

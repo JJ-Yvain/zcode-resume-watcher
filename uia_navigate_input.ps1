@@ -12,9 +12,14 @@
 #   5 navigation verified but no Edit found (caller should run plain focus script)
 #   6 input box has a non-empty draft (checked only with -DraftCheck); message NOT typed
 #   7 focused Edit is not the chat composer (class mismatch) - caller must NOT type
+#   8 composer identified but SetFocus did not land (focus held by another control/app) - same veto:
+#     UIA SetFocus can be silently ignored and the caller's WM_CHAR follows the REAL focus
+#     (2026-10-11 misfire: resume text landing in a browser-panel URL / viewport field)
 #   Notes: 3 also covers InvokePattern failure (not only "header did not change"), and 5 also
 #   covers SetFocus failing on a found Edit. -DryRun exits 0 as soon as exactly one candidate
 #   row is found: it never clicks and never verifies, so 0 there means "would try", not "verified".
+#   On a refusal a one-line CANDIDATES dump (visible+focusable Edits with class/y/value length) is
+#   appended to the log so "could not identify the input box" is explainable after the fact.
 param(
   [string]$ProcName = 'ZCode',
   [string]$TitleCP = '',
@@ -141,6 +146,9 @@ function HeaderTitle {
 $script:FocusedEdit = $null
 $script:FocusedIsComposer = $false
 $script:ComposerRuleBroken = $false
+$script:FocusLanded = $false
+$script:FocusDetail = ''
+$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 function FocusBottomEdit {
   $editCond = New-Object System.Windows.Automation.PropertyCondition(
     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
@@ -176,13 +184,47 @@ function FocusBottomEdit {
     $isComposer = $false
     $script:ComposerRuleBroken = $true
   }
-  if ($null -eq $target) { return $false }
+  if ($null -eq $target) { DumpEdits 'no-edit' $edits; return $false }
+  if (-not $isComposer) { DumpEdits 'not-composer' $edits }
   try {
     $target.SetFocus()
     $script:FocusedEdit = $target
     $script:FocusedIsComposer = $isComposer
-    return $true
   } catch { return $false }
+  # Landing check (same rule as uia_focus_input.ps1): the caller's WM_CHAR follows the REAL focus,
+  # so the picked control must really hold it - UIA SetFocus can be silently ignored, and then the
+  # text lands wherever the focus actually is (browser-panel URL / viewport field, another app).
+  $landed = $false
+  $tgtId = ''
+  try { $tgtId = ($target.Current.RuntimeId -join ',') } catch { $tgtId = '' }
+  try {
+    for ($k = 0; $k -lt 8; $k++) {
+      $fe = [System.Windows.Automation.AutomationElement]::FocusedElement
+      if ($null -ne $fe) {
+        $feId = ''
+        try { $feId = ($fe.Current.RuntimeId -join ',') } catch { $feId = '' }
+        if ($tgtId -ne '' -and $feId -eq $tgtId) { $landed = $true; break }
+        if ($ComposerClassRegex -ne '' -and ($fe.Current.ClassName -match $ComposerClassRegex)) { $landed = $true; break }
+        $p = $fe
+        for ($up = 0; $up -lt 6; $up++) {
+          $p = $walker.GetParent($p)
+          if ($null -eq $p) { break }
+          $pid2 = ''
+          try { $pid2 = ($p.Current.RuntimeId -join ',') } catch { $pid2 = '' }
+          if ($tgtId -ne '' -and $pid2 -eq $tgtId) { $landed = $true; break }
+        }
+        if ($landed) { break }
+      }
+      Start-Sleep -Milliseconds 150
+    }
+  } catch { $landed = $false }
+  $script:FocusLanded = $landed
+  if (-not $landed) {
+    $fcls = '(unreadable)'
+    try { $fcls = [System.Windows.Automation.AutomationElement]::FocusedElement.Current.ClassName } catch { }
+    $script:FocusDetail = ('focused_class=' + $fcls + ' target_class=' + $target.Current.ClassName)
+  }
+  return $true
 }
 # True when the input box carries no draft. Measured empty state is a single newline
 # (Value/TextPattern both readable on this React contenteditable), hence Trim().
@@ -203,6 +245,33 @@ function NotComposerHint {
     }
   }
   return ''
+}
+function DumpEdits([string]$why, $list) {
+  # One line into navigate.log: which Edits were visible+focusable when identity failed, with the
+  # value LENGTH only (never the value itself - a panel URL is user data we do not need here).
+  $parts = @()
+  $vis = 0
+  for ($i = 0; $i -lt $list.Count; $i++) {
+    $e = $list.Item($i)
+    try { $off = $e.Current.IsOffscreen; $foc = $e.Current.IsKeyboardFocusable } catch { continue }
+    if ((-not $off) -and $foc) { $vis++ }
+  }
+  for ($i = 0; $i -lt $list.Count; $i++) {
+    if ($parts.Count -ge 6) { break }
+    $e = $list.Item($i)
+    try { $off = $e.Current.IsOffscreen; $foc = $e.Current.IsKeyboardFocusable } catch { continue }
+    if ($off -or (-not $foc)) { continue }
+    $r = $e.Current.BoundingRectangle
+    $vlen = -1
+    try {
+      $vp = [System.Windows.Automation.ValuePattern]$e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+      $vlen = $vp.Current.Value.Length
+    } catch { }
+    $parts += ('[y=' + [int]$r.Y + ' cls=' + $e.Current.ClassName + ' vlen=' + $vlen + ']')
+  }
+  if ($parts.Count -eq 0) { $parts += '(no visible+focusable Edit)' }
+  LogLine ('CANDIDATES ' + $why + ' total=' + $list.Count + ' visibleFocusable=' + $vis +
+           ' ' + ($parts -join ' '))
 }
 function DraftLooksEmpty {
   if ($null -eq $script:FocusedEdit) { return $true }
@@ -241,7 +310,9 @@ if ($pre -eq $title) {
   LogLine 'ALREADY-ACTIVE (header equals title)'
   if (-not (FocusBottomEdit)) { if ($script:ComposerRuleBroken) { LogLine 'COMPOSER-RULE-BROKEN'; exit 7 } ; exit 5 }
   if (-not $script:FocusedIsComposer) { LogLine ('COMPOSER-NOT-IDENTIFIED' + (NotComposerHint)); exit 7 }
+  if (-not $script:FocusLanded) { LogLine ('FOCUS-NOT-LANDED ' + $script:FocusDetail); exit 8 }
   if ($DraftCheck -and -not (DraftLooksEmpty)) { LogLine 'DRAFT-NONEMPTY abort (already-active path)'; exit 6 }
+  LogLine ('FOCUS-VERIFIED cls=' + $script:FocusedEdit.Current.ClassName)
   exit 0
 }
 
@@ -265,6 +336,7 @@ if (-not $verified) {
 LogLine 'HEADER-VERIFIED'
 if (-not (FocusBottomEdit)) { if ($script:ComposerRuleBroken) { LogLine 'COMPOSER-RULE-BROKEN'; exit 7 } ; exit 5 }
 if (-not $script:FocusedIsComposer) { LogLine 'COMPOSER-NOT-IDENTIFIED'; exit 7 }
+if (-not $script:FocusLanded) { LogLine ('FOCUS-NOT-LANDED ' + $script:FocusDetail); exit 8 }
 if ($DraftCheck -and -not (DraftLooksEmpty)) { LogLine 'DRAFT-NONEMPTY abort'; exit 6 }
-LogLine 'NAV-OK input focused'
+LogLine ('NAV-OK input focused cls=' + $script:FocusedEdit.Current.ClassName)
 exit 0
