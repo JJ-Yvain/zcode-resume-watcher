@@ -1,1 +1,0 @@
-{"timestamp": "2026-10-12T01:33:32.000Z", "event": "turn.failed", "sessionId": "sess_prestart-1", "turnId": "turn_pre", "error": {"code": "UNKNOWN_ERROR", "message": "Turn execution failed", "cause": {"code": "model_request_failed"}}}
