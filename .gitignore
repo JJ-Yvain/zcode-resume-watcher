@@ -5,5 +5,7 @@ __pycache__/
 config.local.json
 tests/rollout/
 tests/syn-log/
+tests/syn-rollout/
 tests/syn-watcher.log
 tests/test-watcher.log
+tests/t3[0-9]-*

@@ -365,6 +365,47 @@ check("T25c 审计:黑名单签名出现在报告且给出调整提示",
 check("T25d 审计:纯只读(未调用 trigger_resume 发送)",
       "已自动发送" not in rep)
 
+# T25e 审计"运行中却无处理记录"不得误报:事件与"之后才发生的启动"落在同一匹配窗口时,
+# 只凭"窗口内有动作"会报假的「疑似处理链路问题」——判据必须是"事件时刻有没有存活证据,
+# 且其后没有被监视器退出掐断"(2026-10-12 实盘误报:12:19:28 事件 + 12:20:17 启动)。
+syn2_dir = os.path.join(SCR, "syn-log-2")
+shutil.rmtree(syn2_dir, ignore_errors=True)
+os.makedirs(syn2_dir)
+now2 = datetime.datetime.now()
+ev_pre = {"timestamp": iso_utc((now2 - datetime.timedelta(minutes=60))
+                               .astimezone(datetime.timezone.utc)),
+          "event": "turn.failed", "sessionId": "sess_prestart-1", "turnId": "turn_pre",
+          "error": {"code": "UNKNOWN_ERROR", "message": "Turn execution failed",
+                    "cause": {"code": "model_request_failed"}}}
+with open(os.path.join(syn2_dir, "zcode-%s.jsonl" % now2.strftime("%Y-%m-%d")),
+          "w", encoding="utf-8") as f:
+    f.write(json.dumps(ev_pre, ensure_ascii=False) + "\n")
+wl2 = wl_syn + ".2"
+with open(wl2, "w", encoding="utf-8") as f:
+    f.write((now2 - datetime.timedelta(minutes=120)).strftime("%Y-%m-%d %H:%M:%S")
+            + " 监视器启动 (轮询 1.0s, live, 触发: broad)\n")
+    f.write((now2 - datetime.timedelta(minutes=90)).strftime("%Y-%m-%d %H:%M:%S")
+            + " 心跳: 监视器运行中 (近 30 分钟无动作,空闲轮询)\n")
+    f.write((now2 - datetime.timedelta(minutes=70)).strftime("%Y-%m-%d %H:%M:%S")
+            + " ⚠ 监视器退出: 控制台窗口被关闭(有人关了黑窗口) (PID 999)\n")
+    f.write((now2 - datetime.timedelta(minutes=59, seconds=11)).strftime("%Y-%m-%d %H:%M:%S")
+            + " 监视器启动 (轮询 1.0s, live, 触发: broad)\n")
+w.LOG_DIR, w.LOG_FILE = syn2_dir, wl2
+rep2 = w.audit_mode(AuditArgs())
+w.LOG_DIR, w.LOG_FILE = old_log_dir, old_log_file
+m_un2 = re.search(r"未处理\(监视器未运行/无响应\) (\d+)", rep2)
+m_anom2 = re.search(r"运行中-无处理记录\(需排查\) (\d+)", rep2)
+check("T25e 事件后 49s 才启动不得误报「运行中漏处理」(启动前有退出=当时没在跑)",
+      m_un2 and m_un2.group(1) == "1" and m_anom2 is None
+      and "疑似处理链路问题" not in rep2,
+      "%s | anomaly=%s" % (m_un2.group(0) if m_un2 else "无",
+                           m_anom2.group(0) if m_anom2 else "无(正确)"))
+shutil.rmtree(syn2_dir, ignore_errors=True)
+try:
+    os.remove(wl2)
+except OSError:
+    pass
+
 # ---- T26(2026-09-11 用户核心诉求):事件驱动节奏——"中断→发→又中断→再发" ----
 # 用户原话:发 5 条指的是"第一次中断后,又报中断继续发一条,再报中断再发一条",
 # 而不是"固定冷却时间到了就发"。此用例直接验证该语义(全程零时间等待)。

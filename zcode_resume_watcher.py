@@ -63,7 +63,7 @@ if IS_WINDOWS:
     from ctypes import wintypes
 
 # ------------------------- 版本与更新源 -------------------------
-VERSION = "1.1.1"                     # 语义化版本,与 GitHub Releases tag(v前缀)比对
+VERSION = "1.1.2"                     # 语义化版本,与 GitHub Releases tag(v前缀)比对
 UPSTREAM_REPO = "JJ-Yvain/zcode-resume-watcher"   # --check-updates 查询的发布源
 CHECK_UPDATES = True                  # 启动时查询最新 release;仅日志提示,绝不自动更新
 MAC_APP_NAME = "ZCode"                # macOS 注入时激活的应用名(config: mac_app_name)
@@ -1597,6 +1597,26 @@ def _local_naive(iso):
         return None
 
 
+def _monitor_running_at(actions, dtl):
+    """事件时刻监视器是否在运行:此前必须有"存活证据"(启动/心跳/任何实际动作),且之后没有被
+    「监视器退出」掐断。只看"匹配窗口里有没有动作"会把"事件之后 49 秒才启动"误判成"运行中漏处理"——
+    2026-10-12 实测:12:19:28 的事件与 12:20:17 的启动落在同一匹配窗口,旧逻辑报了一条假的
+    「疑似处理链路问题,请排查」,而真相是那段时间监视器根本没在跑。
+    "配置行"不算存活证据:任何脚本 import 主模块调 load_config 都会写一行,不代表常驻实例活着。"""
+    last_alive = None
+    last_exit = None
+    for a in actions:
+        if a[0] > dtl:
+            break
+        if a[1] == "配置行":
+            continue
+        if a[1] == "监视器退出":
+            last_exit = a[0]
+        else:
+            last_alive = a[0]
+    return last_alive is not None and (last_exit is None or last_exit < last_alive)
+
+
 def _parse_watcher_actions(path):
     """解析 watcher.log → [(本地 dt, kind, sessionId, raw)]。kind 见 AUDIT_ACTION_KINDS。"""
     out = []
@@ -1773,7 +1793,7 @@ def audit_mode(args):
                                            "监视器退出")]
         if skip:
             stats[skip[0][1]] += 1
-        elif win:
+        elif win and _monitor_running_at(actions, dtl):
             stats["运行中-无处理记录(需排查)"] += 1
             running_anomaly.append((dtl, evt))
         else:
