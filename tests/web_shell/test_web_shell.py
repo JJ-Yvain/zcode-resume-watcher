@@ -83,6 +83,8 @@ class WebShellTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("已暂停,跳过自动发送", text)
 
+    @unittest.skipUnless(sys.platform == "win32",
+                         "Windows test-send path; macOS uses osascript")
     def test_test_send_without_window_returns_none(self):
         saved = self.engine.find_zcode_hwnd
         self.engine.find_zcode_hwnd = lambda: None
