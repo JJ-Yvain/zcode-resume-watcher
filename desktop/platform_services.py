@@ -130,7 +130,11 @@ def close_panel_window(hwnd):
     user32.PostMessageW.restype = wt.BOOL
     user32.IsWindow.argtypes = [wt.HWND]
     user32.IsWindow.restype = wt.BOOL
+    user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
     try:
+        #  minimized 状态下关闭,Edge 会把"最小化"记成上次状态,下次 --app 继续最小化。
+        user32.ShowWindow(int(hwnd), 9)                 # SW_RESTORE
+        time.sleep(0.15)
         user32.PostMessageW(int(hwnd), 0x0112, 0xF060, 0)   # SC_CLOSE
         for _ in range(20):
             if not user32.IsWindow(int(hwnd)):
@@ -224,9 +228,13 @@ def close_panel_windows(title="ZCode 续命监视器"):
     user32 = ctypes.windll.user32
     user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
     user32.PostMessageW.restype = wt.BOOL
+    user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
     closed = 0
     for hwnd in handles:
         try:
+            # 先恢复正常态再关,避免 Edge 把最小化状态记进 session restore。
+            user32.ShowWindow(int(hwnd), 9)                 # SW_RESTORE
+            time.sleep(0.15)
             # Edge 的顶层 app 窗忽略 WM_CLOSE;WM_SYSCOMMAND/SC_CLOSE 才会真的关。
             user32.PostMessageW(int(hwnd), 0x0112, 0xF060, 0)
             closed += 1
