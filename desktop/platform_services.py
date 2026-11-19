@@ -296,8 +296,6 @@ def open_edge_app(url, width=1440, height=900, on_window=None):
             args = [exe,
                     "--window-size=%d,%d" % (int(width), int(height)),
                     "--no-first-run", "--no-default-browser-check",
-                    "--disable-features=msEdgeSidebarV2,msEdgeCopilot,"
-                    "msEdgeChat,msEdgeDiscover",
                     "--app=" + url]
             try:
                 subprocess.Popen(args, stdout=subprocess.DEVNULL,
