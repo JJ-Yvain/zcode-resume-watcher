@@ -243,24 +243,27 @@ def close_panel_windows(title="ZCode 续命监视器"):
 def _place_new_window(before, width, height, title="ZCode 续命监视器",
                       on_window=None):
     """后台等新窗口出现再定尺寸;不阻塞启动。"""
-    for _ in range(60):
+    for _ in range(120):
         time.sleep(0.25)
-        fresh = _panel_windows(title) - before
-        if fresh:
-            for hwnd in fresh:
+        handles = _panel_windows(title)
+        fresh = handles - before
+        # Edge 冷启动慢/复用窗口时可能没有"全新句柄";退化为修正当前唯一匹配窗。
+        target = fresh if fresh else handles
+        if target:
+            for hwnd in target:
                 try:
                     _fit_window(hwnd, width, height)
                 except Exception:
                     pass
             if on_window is not None:
-                for hwnd in fresh:
+                for hwnd in target:
                     try:
                         on_window(int(hwnd))
                     except Exception:
                         pass
             # Edge 会在页面恢复后把保存的窗口尺寸再盖回来,补一次。
             time.sleep(1.2)
-            for hwnd in _panel_windows(title) & fresh:
+            for hwnd in _panel_windows(title) & target:
                 try:
                     _fit_window(hwnd, width, height)
                 except Exception:
