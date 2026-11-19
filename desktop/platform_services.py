@@ -176,8 +176,12 @@ def find_panel_window(title="ZCode 续命监视器"):
     return int(sorted(handles)[-1]) if handles else None
 
 
-def focus_panel_window(title="ZCode 续命监视器"):
-    """已有面板窗口就恢复并置前;返回句柄,没有则 None。"""
+def focus_panel_window(title="ZCode 续命监视器", width=1440, height=900):
+    """已有面板窗口就恢复并置前;返回句柄,没有则 None。
+
+    正常/最大化的窗口只唤回,不覆盖用户尺寸;最小化或掉到屏幕外(如 159×27)
+    才按保存尺寸恢复,避免"托盘点了但窗口在 -25600 处看不见"。
+    """
     if not IS_WINDOWS:
         return None
     handles = _panel_windows(title)
@@ -190,11 +194,19 @@ def focus_panel_window(title="ZCode 续命监视器"):
         user32 = ctypes.windll.user32
         user32.IsIconic.argtypes = [wt.HWND]
         user32.IsIconic.restype = wt.BOOL
+        user32.IsZoomed.argtypes = [wt.HWND]
+        user32.IsZoomed.restype = wt.BOOL
         user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
         user32.SetForegroundWindow.argtypes = [wt.HWND]
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, 9)      # 只从最小化恢复,不覆盖用户尺寸
-        user32.SetForegroundWindow(hwnd)
+        if user32.IsZoomed(hwnd):
+            user32.SetForegroundWindow(hwnd)
+            return hwnd
+        if window_size(hwnd) is None:      # 最小化 / 离屏占位 / 异常尺寸
+            _fit_window(hwnd, width, height)
+        else:
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)
+            user32.SetForegroundWindow(hwnd)
         return hwnd
     except Exception:
         return None

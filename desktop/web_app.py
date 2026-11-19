@@ -352,7 +352,8 @@ class DesktopApp:
         if not self._url:
             return False
         # 已有窗口就唤回;没有才新开。托盘双击也只会得到一个窗口。
-        hwnd = platform_services.focus_panel_window()
+        hwnd = platform_services.focus_panel_window(
+            width=self._window_size[0], height=self._window_size[1])
         if hwnd:
             self._panel_hwnd = int(hwnd)
             return True
