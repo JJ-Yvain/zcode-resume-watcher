@@ -35,24 +35,39 @@ ZCode 里跑长任务时，两类失败会让任务悄悄死掉，人却未必�
 - **智能归位**（Windows）：发送前把界面切回出错的会话本身——sessionId 反查会话标题 → 侧栏定位点击 → 顶栏标题逐字验证 → 输入框有草稿则放弃（宁可不发，绝不错发到别的对话）。聚焦后会**回读真实焦点核验落地**（`SetFocus` 可能被静默忽略，而按键跟着真实焦点走），焦点没落在聊天输入框上就拒发。
 - **覆盖审计** `--audit`：只读扫描历史日志，报告"哪些中断没被续命到"（区分监视器没在跑 vs 规则没覆盖），以及悬空 turn、新报错形态候选——扩面的日常入口。
 - **更新检查** `--check-updates`：查询本仓库最新 Release 提示新版本（只提示不自动更新，可配置关闭）。
+- **桌面面板 + 托盘**（v1.2.0）：无黑窗启动；Edge app 窗展示 24h 续命记录与「检测→归位→注入→核验」
+  四段链路，亮/暗双主题；关闭窗口不退出引擎，托盘可暂停/继续、测试发送、打开日志/配置、退出；
+  窗口大小会被记住，下次从托盘打开或重启沿用。
 - **交互式架构页**：`architecture.html` 单文件直开，11 个可点击场景演示信号管线与守卫语义，含无头自检钩子。
 
 ## 安装
 
 ### Windows（全功能）
 
-1. 从 [Releases](../../releases) 下载 zip 并解压（或 `git clone` 本仓库）；
-2. 双击 **`启动自动续命.bat`** —— 不需要预装 Python：脚本会自动从 python.org 下载官方便携版到用户目录（不改注册表、不加 PATH，随时可整目录删除）；
-3. 最小化黑色窗口即可，双击多次不会重复启动。
+1. 从 [Releases](../../releases) 下载 zip 并解压（或 `git clone` 本仓库；面板在 main，Release 包可能滞后）；
+2. 双击 **`启动续命面板.bat`**（推荐，无黑窗；关闭 Edge 窗口只是收起界面，托盘右键「退出」才停止）；
+   需要控制台调试时改用 **`启动自动续命.bat`**；
+3. 首次运行会自动从 python.org 下载官方便携版到用户目录（不改注册表、不加 PATH，随时可整目录删除）。
 
 也可以用 `测试发送.bat` 验证注入链路（10 秒倒计时后向当前会话发一条测试消息）。
+
+### 桌面面板（v1.2.0，推荐）
+
+- 本地面板只绑定 `127.0.0.1` 随机端口，带每次启动随机 token；页面是单文件 HTML，无外部请求；
+- 左侧近 24h 续命记录（全部 / 送达 / 异常 / 拦截），右侧一次恢复的四段链路与证据原文；
+- 关闭 Edge 窗口 ≠ 退出引擎：引擎继续在托盘运行，托盘左键重新打开；托盘「退出」才会停引擎并关闭面板；
+- 暂停只拦自动发送，检测/日志照常；测试发送与自动续命共用发送锁，不会同时打字；
+- 窗口大小自动记住；修改 `config.json` 后需重启面板（托盘退出再双击）。
+- 依赖系统 Edge 的 `--app` 模式；无 Edge 时回落默认浏览器。面板 UI 是观察者/遥控器，
+  不改变引擎的判定、去重、熔断、归位与「宁可不发」策略。
 
 ### macOS（实验版 v1）
 
 ```bash
 git clone https://github.com/JJ-Yvain/zcode-resume-watcher.git
 cd zcode-resume-watcher
-./启动自动续命.command        # 或在访达里双击它
+./启动续命面板.command        # 推荐：本地面板（v1.2.0；macOS v1 无菜单栏图标）
+./启动自动续命.command        # 控制台版（调试/无桌面环境）
 ```
 
 **无需预装 Python**：启动器自动探测已有解释器（Homebrew / uv 托管 / 已装命令行工具的
@@ -113,7 +128,8 @@ python zcode_resume_watcher.py --version            # 当前版本
 
 - ZCode 升级可能改动日志字段或 UI 结构（UIA 类名等）——`--audit` 的签名统计是早期预警，多数适配改 `config.json` 即可；
 - ZCode 会定期清理 rollout 目录，历史 model-io 文件会消失（监听已兼容）；
-- macOS v1 无智能归位/草稿检测（见上）；
+- macOS v1 智能归位选择器待真机校准，草稿检测缺失；桌面面板无菜单栏图标（v1 用 `.command` 前台运行）；
+- 桌面面板依赖系统 Edge；Edge app 窗标题栏/任务栏图标已设为本应用图标，但 Edge 浏览器进程本身仍会常驻；
 - 监视器进程本身可能静默消失（无自动拉起，作者的有意取舍）——建议偶尔跑一次 `--audit` 兜底。
 
 ## 更新
@@ -124,7 +140,9 @@ python zcode_resume_watcher.py --version            # 当前版本
 ## 相关链接
 
 - [architecture.html](architecture.html) — 交互式架构页（信号管线 / 11 场景 / 守卫语义）
-- [tests/driver.py](tests/driver.py) — 111 项合成回归（`python tests/driver.py`，CI 在 Windows/macOS/Linux 三平台运行）
+- [tests/driver.py](tests/driver.py) — 112 项引擎合成回归（`python tests/driver.py`）
+- [tests/web_shell/test_web_shell.py](tests/web_shell/test_web_shell.py) — 12 项桌面壳接缝测试（`python -m unittest discover -s tests/web_shell`）
+- CI 在 Windows/macOS/Linux 三平台运行以上两套测试
 
 ## License
 
@@ -141,5 +159,6 @@ python zcode_resume_watcher.py --version            # 当前版本
 - **Detection**: dual-channel (event log + model-IO log), unknown error types covered by default, user-initiated cancellations and hopeless errors never triggered, per-session circuit breaker (5 sends, reset on success).
 - **Smart re-focus** (Windows): resolves the session title from the local database, clicks the sidebar entry, verifies via the header title, and aborts if a draft is present (better to miss one than to send into the wrong conversation).
 - **Fully local**: zero third-party dependencies, no telemetry; `--check-updates` only pings the GitHub API (disable via `check_updates: false`).
+- **Desktop panel** (v1.2.0): a local single-file HTML panel in an Edge app window + tray icon; 24h recovery list, four-stage chain, light/dark themes, pause/test-send, remembered window size. Closing the window keeps the engine running; use the tray menu to quit.
 - **Platforms**: Windows full-featured; macOS experimental (AppleScript injection + AX-based smart re-focus in beta; Accessibility permission required; no draft-check yet).
-- **Install**: grab the zip from [Releases](../../releases), run `启动自动续命.bat` (Windows) or `./启动自动续命.command` (macOS) — both auto-bootstrap a user-local Python if none is present. See the Chinese sections above for full details.
+- **Install**: grab the zip from [Releases](../../releases), run `启动续命面板.bat` (Windows) or `./启动续命面板.command` (macOS) — both auto-bootstrap a user-local Python if none is present. Console launchers are still available for debugging. See the Chinese sections above for full details.

@@ -50,6 +50,7 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.request
@@ -63,7 +64,7 @@ if IS_WINDOWS:
     from ctypes import wintypes
 
 # ------------------------- 版本与更新源 -------------------------
-VERSION = "1.1.2"                     # 语义化版本,与 GitHub Releases tag(v前缀)比对
+VERSION = "1.2.0"                     # 语义化版本,与 GitHub Releases tag(v前缀)比对
 UPSTREAM_REPO = "JJ-Yvain/zcode-resume-watcher"   # --check-updates 查询的发布源
 CHECK_UPDATES = True                  # 启动时查询最新 release;仅日志提示,绝不自动更新
 MAC_APP_NAME = "ZCode"                # macOS 注入时激活的应用名(config: mac_app_name)
@@ -228,6 +229,25 @@ def load_config(path=None):
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watcher.log")
 
+# ---- 桌面壳的接缝:日志观察者 / 暂停信号 / 发送互斥 ----
+# 引擎仍可独立运行;这些全局量默认未设置,行为与旧版完全一致。
+_LOG_LOCK = threading.RLock()
+_SEND_LOCK = threading.RLock()
+LOG_OBSERVER = None
+PAUSE_EVENT = None
+
+
+def set_log_observer(fn):
+    """注册日志观察者:每写一行(含退出遗言)回调一次;异常绝不影响主流程。"""
+    global LOG_OBSERVER
+    LOG_OBSERVER = fn
+
+
+def set_pause_event(event):
+    """注册暂停信号(threading.Event);置位时只拦自动发送,检测/记录照常。"""
+    global PAUSE_EVENT
+    PAUSE_EVENT = event
+
 # ------------------------- win32 基础(仅 Windows 加载;macOS 走 osascript) -------------------------
 if IS_WINDOWS:
     user32 = ctypes.windll.user32
@@ -243,14 +263,36 @@ if IS_WINDOWS:
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 
 
+def _append_log_line(line, notify=True):
+    """写一行日志并通知观察者。写文件失败静默;观察者异常也不影响引擎。
+
+    ``notify=False`` 用于系统控制台事件回调:窗口关闭/注销只给几秒宽限,
+    只落文件,不在回调里做任何可能阻塞的通知。
+    """
+    with _LOG_LOCK:
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+        observer = LOG_OBSERVER
+        if notify and observer is not None:
+            try:
+                observer(line)
+            except Exception:
+                pass
+
+
 def log(msg):
     line = "%s %s" % (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg)
-    print(line, flush=True)
+    # pythonw 下 sys.stdout 为 None;GBK 控制台遇到会话标题里的 emoji 也会抛
+    # UnicodeEncodeError。日志文件才是事实来源,打印只是控制台便利。
     try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except OSError:
+        if sys.stdout is not None:
+            print(line, flush=True)
+    except Exception:
         pass
+    _append_log_line(line)
 
 
 # ------------------------- 退出取证(遗言) -------------------------
@@ -270,15 +312,12 @@ def _note_exit(reason, console=True):
     本函数绝不抛异常。"""
     line = "%s ⚠ 监视器退出: %s (PID %d)" % (
         datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), reason, os.getpid())
-    try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except OSError:
-        pass
+    _append_log_line(line, notify=console)
     if not console:
         return
     try:
-        print(line, flush=True)
+        if sys.stdout is not None:
+            print(line, flush=True)
     except Exception:
         pass
 
@@ -288,8 +327,7 @@ def _dump_traceback():
     try:
         tb = "%s ⚠ 监视器异常 traceback:\n%s" % (
             datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), traceback.format_exc())
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(tb + "\n")
+        _append_log_line(tb)
     except Exception:
         pass
 
@@ -1256,6 +1294,15 @@ class Tailer:
 
 # ------------------------- 触发发送 -------------------------
 def trigger_resume(reason, evt, args):
+    """公开入口:暂停闸门 + 发送串行化(UI 测试发送与自动续命不交叉)。"""
+    if PAUSE_EVENT is not None and PAUSE_EVENT.is_set():
+        log("已暂停,跳过自动发送 (%s, %s)" % (reason, (evt or {}).get("sessionId")))
+        return False
+    with _SEND_LOCK:
+        return _trigger_resume_impl(reason, evt, args)
+
+
+def _trigger_resume_impl(reason, evt, args):
     """归位 → 注入 → **以库为准核验送达**,未送达则有界重试。
     返回是否确认送达(未送达一律返回 False,不计入熔断,保留后续报错的重试机会)。
 
@@ -1429,9 +1476,10 @@ def handle_quota_record(rec, sess, st, args, allow_judge=True):
 
 
 # ------------------------- 单实例保护 -------------------------
-def acquire_single_instance():
+def acquire_single_instance(name=r"Local\ZCodeResumeWatcher"):
     """同名互斥体防止双开;返回持有的句柄,二次启动返回 None。
-    macOS 无互斥体,以锁文件(tempfile 目录,含 PID)代替,旧进程死亡后残锁自动失效。"""
+    macOS 无互斥体,以锁文件(tempfile 目录,含 PID)代替,旧进程死亡后残锁自动失效。
+    ``name`` 仅供隔离测试覆盖;生产入口不传。"""
     if IS_MACOS:
         import tempfile
         lock = os.path.join(tempfile.gettempdir(), "zcode-resume-watcher.lock")
@@ -1454,7 +1502,9 @@ def acquire_single_instance():
     kernel32x = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32x.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     kernel32x.CreateMutexW.restype = wintypes.HANDLE
-    handle = kernel32x.CreateMutexW(None, False, "Local\\ZCodeResumeWatcher")
+    kernel32x.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32x.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32x.CreateMutexW(None, False, name)
     if not handle:
         return None
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
@@ -1463,18 +1513,80 @@ def acquire_single_instance():
     return handle
 
 
+def release_single_instance(handle):
+    """释放单实例句柄/残锁;进程退出时系统也会自动释放,这里用于有序退出。"""
+    if not handle:
+        return
+    if IS_MACOS:
+        try:
+            os.unlink(handle)
+        except OSError:
+            pass
+        return
+    try:
+        kernel32r = ctypes.WinDLL("kernel32")
+        kernel32r.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32r.CloseHandle.restype = wintypes.BOOL
+        kernel32r.CloseHandle(handle)
+    except Exception:
+        pass
+
+
+def wait_for_send_idle(timeout=30.0):
+    """等当前发送链结束(期间不再开新发送);返回是否在超时内拿到锁。"""
+    got = _SEND_LOCK.acquire(timeout=max(0.0, float(timeout)))
+    if got:
+        _SEND_LOCK.release()
+    return got
+
+
+def test_send_once(delay=10.0, announce=True):
+    """人工测试发送一次(不核验送达)。控制台 --test-send 与桌面面板共用。
+
+    返回 True=已投递,False=未投递,None=找不到 ZCode 窗口(CLI 据此退 1)。
+    ``delay`` 为倒计时秒数;面板调用时传 0,避免 HTTP 请求长时间挂起。
+    """
+    with _SEND_LOCK:
+        if IS_MACOS:
+            if announce:
+                print("macOS 测试发送 '%s' (Ctrl+C 取消;需先授权辅助功能权限)" % MESSAGE,
+                      flush=True)
+            if delay > 0:
+                time.sleep(delay)
+            ok = mac_inject_text(MESSAGE)
+            log("测试发送(macOS,人工触发): %s" % ("已投递(未核验送达)" if ok else "未投递"))
+            if announce:
+                print("发送结果: %s" % ok, flush=True)
+            return bool(ok)
+        hwnd = find_zcode_hwnd()
+        if hwnd is None:
+            if announce:
+                print("找不到 ZCode 窗口", flush=True)
+            return None
+        # 人工试用也留档:过去 --test-send 无论成功还是打偏都不写日志,试用结果事后无从复盘(2026-10-11)
+        log("=== 测试发送(人工触发): %d 秒后向当前会话投递 '%s' ===" % (int(delay), MESSAGE))
+        if announce:
+            print("找到 ZCode 窗口 %s,%d 秒后测试发送 '%s' (Ctrl+C 取消)"
+                  % (hwnd, int(delay), MESSAGE), flush=True)
+        if delay > 0:
+            time.sleep(delay)
+        ok = inject_text(hwnd, MESSAGE)
+        log("测试发送结果: %s" % ("WM_CHAR 已投递(未核验送达;请在目标会话里核对)"
+                                  if ok else "未投递(输入框未就绪/焦点未落地,原因见上一行)"))
+        if announce:
+            print("发送结果: %s" % ok, flush=True)
+        return bool(ok)
+
+
 # ------------------------- 主流程 -------------------------
-def run_watcher(args):
-    mutex = acquire_single_instance()
-    if mutex is None:
-        print("监视器已在运行(双击不要重复启动)。需要停止时关掉之前的黑色窗口即可。")
-        sys.exit(0)
+def run_watcher(args, stop_event=None):
+    """主循环。互斥体/退出取证由入口(CLI main 或桌面 app)负责,便于 UI 复用。
+
+    ``stop_event`` 置位后退出循环并关闭尾随句柄;为 None 时行为与旧版一致。
+    """
     tailer = Tailer()
     rollout_tailers = {}
     st = WatchState()
-    forensic = install_console_ctrl_logger()
-    if forensic:
-        log("退出取证已启用(控制台事件回调:关窗口/Ctrl+C/注销/关机都会留遗言), PID %d" % os.getpid())
     log("监视器启动 (平台: %s, PID %d, 轮询 %ss, %s, 额度监听: %s, 智能归位: %s, 触发: %s, 熔断: %d, 停滞: %s, 心跳: %s)" % (
         "Windows" if IS_WINDOWS else ("macOS" if IS_MACOS else sys.platform),
         os.getpid(), args.interval, "dry-run" if args.dry_run else "live",
@@ -1485,44 +1597,63 @@ def run_watcher(args):
         ("开,%ds" % int(STALL_TIMEOUT_SECONDS)) if STALL_ENABLED else "关",
         ("%dmin" % HEARTBEAT_MINUTES) if HEARTBEAT_MINUTES > 0 else "关"))
     last_heartbeat = time.monotonic()
-    while True:
-        path = os.path.join(LOG_DIR, "zcode-%s.jsonl" % datetime.date.today().isoformat())
-        try:
-            events = tailer.read_new(path)
-        except OSError as e:
-            log("读取日志失败: %s" % e)
-            time.sleep(args.interval)
-            continue
-        for evt in events:
-            ev_name = evt.get("event")
-            if ev_name == "turn.failed" and args.debug:
-                log("turn.failed 事件: %s" % describe_skip(evt))
-            track_turn_liveness(evt, st)
-            handle_event_failure(evt, st, args)
-        # ---- provider 额度"假成功":尾随 rollout/model-io-sess_*.jsonl ----
-        if QUOTA_ENABLED:
-            live_paths = set()
-            for rpath, sess in scan_rollout_files():
-                live_paths.add(rpath)
-                t = rollout_tailers.get(rpath)
-                if t is None:
-                    t = rollout_tailers[rpath] = Tailer()  # 新文件从文件尾开始(R3)
-                try:
-                    records = t.read_new(rpath)
-                except OSError as e:
-                    log("读取 rollout 日志失败(%s): %s" % (os.path.basename(rpath), e))
-                    continue
-                for rec in records:
-                    handle_quota_record(rec, sess, st, args)
-            for gone in [p for p in rollout_tailers if p not in live_paths]:
-                rollout_tailers.pop(gone).close()
-        if STALL_ENABLED:
-            check_stalls(st, args)
-        if HEARTBEAT_MINUTES > 0 and time.monotonic() - last_heartbeat >= HEARTBEAT_MINUTES * 60:
-            log("心跳: 监视器运行中 (近 %d 分钟无动作,空闲轮询, PID %d)"
-                % (HEARTBEAT_MINUTES, os.getpid()))
-            last_heartbeat = time.monotonic()
-        time.sleep(args.interval)
+
+    def stopped():
+        return stop_event is not None and stop_event.is_set()
+
+    def wait_or_stop(seconds):
+        if stop_event is None:
+            time.sleep(seconds)
+            return False
+        return stop_event.wait(seconds)
+
+    try:
+        while not stopped():
+            path = os.path.join(LOG_DIR, "zcode-%s.jsonl" % datetime.date.today().isoformat())
+            try:
+                events = tailer.read_new(path)
+            except OSError as e:
+                log("读取日志失败: %s" % e)
+                wait_or_stop(args.interval)
+                continue
+            for evt in events:
+                if stopped():
+                    break
+                ev_name = evt.get("event")
+                if ev_name == "turn.failed" and args.debug:
+                    log("turn.failed 事件: %s" % describe_skip(evt))
+                track_turn_liveness(evt, st)
+                handle_event_failure(evt, st, args)
+            # ---- provider 额度"假成功":尾随 rollout/model-io-sess_*.jsonl ----
+            if QUOTA_ENABLED and not stopped():
+                live_paths = set()
+                for rpath, sess in scan_rollout_files():
+                    live_paths.add(rpath)
+                    t = rollout_tailers.get(rpath)
+                    if t is None:
+                        t = rollout_tailers[rpath] = Tailer()  # 新文件从文件尾开始(R3)
+                    try:
+                        records = t.read_new(rpath)
+                    except OSError as e:
+                        log("读取 rollout 日志失败(%s): %s" % (os.path.basename(rpath), e))
+                        continue
+                    for rec in records:
+                        handle_quota_record(rec, sess, st, args)
+                for gone in [p for p in rollout_tailers if p not in live_paths]:
+                    rollout_tailers.pop(gone).close()
+            if STALL_ENABLED and not stopped():
+                check_stalls(st, args)
+            if HEARTBEAT_MINUTES > 0 and time.monotonic() - last_heartbeat >= HEARTBEAT_MINUTES * 60:
+                log("心跳: 监视器运行中 (近 %d 分钟无动作,空闲轮询, PID %d)"
+                    % (HEARTBEAT_MINUTES, os.getpid()))
+                last_heartbeat = time.monotonic()
+            wait_or_stop(args.interval)
+    finally:
+        tailer.close()
+        for t in rollout_tailers.values():
+            t.close()
+        if stop_event is not None and stop_event.is_set():
+            log("监视器主循环已停止(收到面板停止请求)")
 
 
 def once_mode(args):
@@ -1994,26 +2125,17 @@ def main():
             print("普通聚焦补偿结果:", uia_focus_input(), flush=True)
         sys.exit(0 if ok else 3)
     if args.test_send:
-        if IS_MACOS:
-            print("macOS 测试发送 '%s' (Ctrl+C 取消;需先授权辅助功能权限)" % MESSAGE, flush=True)
-            time.sleep(3)
-            ok = mac_inject_text(MESSAGE)
-            log("测试发送(macOS,人工触发): %s" % ("已投递(未核验送达)" if ok else "未投递"))
-            print("发送结果: %s" % ok, flush=True)
-            return
-        hwnd = find_zcode_hwnd()
-        if hwnd is None:
-            print("找不到 ZCode 窗口", flush=True)
+        result = test_send_once(delay=3.0 if IS_MACOS else 10.0, announce=True)
+        if result is None:
             sys.exit(1)
-        # 人工试用也留档:过去 --test-send 无论成功还是打偏都不写日志,试用结果事后无从复盘(2026-10-11)
-        log("=== 测试发送(人工触发): 10 秒后向当前会话投递 '%s' ===" % MESSAGE)
-        print("找到 ZCode 窗口 %s,10 秒后测试发送 '%s' (Ctrl+C 取消)" % (hwnd, MESSAGE), flush=True)
-        time.sleep(10)
-        ok = inject_text(hwnd, MESSAGE)
-        log("测试发送结果: %s" % ("WM_CHAR 已投递(未核验送达;请在目标会话里核对)"
-                                  if ok else "未投递(输入框未就绪/焦点未落地,原因见上一行)"))
-        print("发送结果: %s" % ok, flush=True)
         return
+    mutex = acquire_single_instance()
+    if mutex is None:
+        print("监视器已在运行(双击不要重复启动)。需要停止时关掉之前的黑色窗口即可。")
+        return
+    forensic = install_console_ctrl_logger()
+    if forensic:
+        log("退出取证已启用(控制台事件回调:关窗口/Ctrl+C/注销/关机都会留遗言), PID %d" % os.getpid())
     try:
         run_watcher(args)
     except KeyboardInterrupt:

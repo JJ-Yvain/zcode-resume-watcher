@@ -365,7 +365,7 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
   <p class="lede">双日志源感知 → 双通道判定 + 三重守卫 → 归位到出错会话后注入。纯 Python 标准库与 ctypes，不装任何第三方包，全程不依赖 SendInput。Windows 全功能；macOS 实验版（v1.5：AX 智能归位 + osascript 注入）。</p>
 
   <dl class="specs">
-    <div><dt>主脚本</dt><dd>2029<span>行 Python</span></dd></div>
+    <div><dt>主脚本</dt><dd>2151<span>行 Python</span></dd></div>
     <div><dt>UIA 脚本</dt><dd>491<span>行 PowerShell</span></dd></div>
     <div><dt>配置项</dt><dd>40<span>键</span></dd></div>
     <div><dt>归位退出码</dt><dd>10<span>种</span></dd></div>
@@ -557,6 +557,30 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
   </div>
 </section>
 
+<!-- ══════════ 桌面壳 ══════════ -->
+<section class="wrap wrap--wide">
+  <div class="sec-h">
+    <h2>桌面壳：把引擎装进托盘，不碰判定</h2>
+    <span class="hint">双击 启动续命面板.bat</span>
+  </div>
+  <p class="sec-note">v1.2.0 新增的一层。引擎仍是唯一判定者；面板只读日志、只发四个控制动作（暂停/继续/测试发送/打开文件），所有动作仍走原来的守卫。</p>
+
+  <div class="audit">
+    <article><div class="n">进程 一</div><h3>引擎线程</h3><p>原 <code>run_watcher</code> 放进后台线程，多一个 <code>stop_event</code>；判定、去重、熔断、归位、注入、送达核验一行没改。</p></article>
+    <article><div class="n">进程 二</div><h3>本地面板</h3><p><code>127.0.0.1</code> 随机端口 + 每次启动随机 token；<code>/api/*</code> 校验 <code>X-Token</code> 与 Host。面板是单文件 HTML，无外部请求。</p></article>
+    <article><div class="n">进程 三</div><h3>Edge app 窗</h3><p>系统 Edge <code>--app</code> 打开 1440×900 无地址栏窗口；关闭窗口只收起界面，引擎留在托盘继续跑。</p></article>
+    <article><div class="n">进程 四</div><h3>托盘</h3><p>ctypes <code>Shell_NotifyIcon</code>：运行 sage、暂停 amber、异常 rust；菜单可暂停/测试/看日志/退出。测试发送先弹原生确认。</p></article>
+    <article><div class="n">进程 五</div><h3>单实例</h3><p>与 CLI 共用 <code>Local\ZCodeResumeWatcher</code> 互斥体；二次启动读 <code>panel_runtime.json</code> 并 ping，直接唤回已有面板，不启第二个引擎。</p></article>
+    <article><div class="n">进程 六</div><h3>有序退出</h3><p>暂停 → 停循环 → 等在途发送（≤30s）→ join → 写「监视器退出」遗言 → 停 HTTP → 删运行时文件 → 释放互斥体。</p></article>
+  </div>
+
+  <div class="finding">
+    <h3>为什么不是 Tkinter</h3>
+    <p>Tk 原型的信息结构能过，但视觉精度不够（用户直说「AI slop」）。换成本地 HTML + Edge app 窗后，才做到发丝线、亮暗双主题和精确对齐；代价是依赖系统 Edge，不引入 Electron/WebView2。引擎回归仍是 <strong>112/112</strong>，桌面壳另加 <strong>12/12</strong> 接缝测试。</p>
+    <p class="mono">踩坑：固定端口会被本机别的 app 的 Service Worker 劫持；专用 Edge profile 会弹账号同步提示；125% DPI 下需 Win32 定尺寸而不是只信 --window-size。</p>
+  </div>
+</section>
+
 <!-- ══════════ 文件地图 ══════════ -->
 <section class="wrap wrap--wide">
   <div class="sec-h">
@@ -566,11 +590,15 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
   <table class="files">
     <thead><tr><th>文件</th><th>规模</th><th>职责</th></tr></thead>
     <tbody>
-      <tr><td>zcode_resume_watcher.py</td><td>2029 行</td><td>全部感知 / 判定 / 守卫 / 归位调度 / 注入 / 送达核验 / 退出取证 / 审计。纯标准库加 ctypes，单文件。</td></tr>
+      <tr><td>zcode_resume_watcher.py</td><td>2151 行</td><td>全部感知 / 判定 / 守卫 / 归位调度 / 注入 / 送达核验 / 退出取证 / 审计，以及仅供桌面壳使用的五个接缝。纯标准库加 ctypes，单文件。</td></tr>
       <tr><td>uia_navigate_input.ps1</td><td>342 行</td><td>侧栏定位点击、顶栏标题验证、草稿读取、输入框聚焦（只认可见、可聚焦且 class 匹配聊天输入框特征的 Edit）；聚焦后回读 FocusedElement 核验落地，没落地报 8；身份失败打 CANDIDATES 候选清单。纯 ASCII，中文用码点串传参。</td></tr>
       <tr><td>uia_focus_input.ps1</td><td>149 行</td><td>兜底聚焦：归位未走到输入框时，独立把底部 Edit 设为焦点；跳过离屏/不可聚焦节点；识别不出聊天输入框报 7、焦点没落地报 8，一律拒绝盲打字。</td></tr>
       <tr><td>config.json</td><td>40 键</td><td>消息文本、两个日志源、黑名单、阈值、正则、送达核验与重试、判官端点全部可调。</td></tr>
       <tr><td>启动自动续命.bat</td><td>—</td><td>双击常驻。带 Python 自动引导：已装则直接用，没装则从 python.org 拉绿色便携版到用户目录，不碰注册表与 PATH。</td></tr>
+      <tr><td>启动续命面板.bat / ZCode续命面板.pyw</td><td>—</td><td>v1.2.0 推荐入口：pythonw 无黑窗；系统 Edge 以 --app 打开 1440×900 本地面板；关闭窗口后引擎留在托盘。</td></tr>
+      <tr><td>desktop/</td><td>9 模块 + 面板</td><td>桌面壳：web_app（引擎线程/托盘/单实例）、web_runtime（日志→面板数据）、web_server（127.0.0.1+token）、tray_win（ctypes 托盘）、engine_host、platform_services、web_preview、make_icons、webui/panel.html。</td></tr>
+      <tr><td>desktop/webui/panel.html</td><td>82 KB</td><td>单文件自包含面板（生成物）：A 方向恢复控制台、四段链路、亮暗双主题；源在私有仓 原型/_src/。</td></tr>
+      <tr><td>tests/web_shell/</td><td>12 项</td><td>桌面壳接缝测试：日志观察者、暂停闸门、停止信号、互斥体名、运行时四段链路、面板 API、app 生命周期。</td></tr>
       <tr><td>测试发送.bat</td><td>—</td><td>10 秒倒计时后试发一条，用来验证注入链是否通。</td></tr>
       <tr><td>watcher.log / navigate.log</td><td>—</td><td>运行与归位决策日志。含会话标题，因此不进版本库。</td></tr>
     </tbody>
@@ -620,31 +648,31 @@ var SC=[
  {id:'conn', grp:'会触发并发送', label:'连接重试耗尽', tone:'a', ch:'A',
   rule:'cause.code = model_request_failed', out:'发送', outKind:'send', blockAt:-1,
   note:'ZCode 自己重试 10 次仍失败才轮到我们。这是最经典、也最常发生的一种。',
-  logs:[['10:46:07','归位成功(顶栏标题验证): 「❤️示例会话甲」','hit'],
+  logs:[['10:46:07','归位成功(顶栏标题验证): 「●示例会话甲」','hit'],
         ['10:46:08',"已自动发送 '任务意外中断，请继续！' (connection, sess_demo0000-1111-2222-3333-444444444444)",'hit']]},
 
  {id:'empty', grp:'会触发并发送', label:'模型空响应', tone:'a', ch:'A',
   rule:'error.code = MODEL_ERROR + reason = empty_model_response', out:'发送', outKind:'send', blockAt:-1,
   note:'流中断返回空内容。这条 ZCode 不会重试，也没有重试按钮，只能靠续命消息推它一把。',
-  logs:[['14:22:51','归位成功(顶栏标题验证): 「❤️示例会话乙」','hit'],
+  logs:[['14:22:51','归位成功(顶栏标题验证): 「●示例会话乙」','hit'],
         ['14:22:52',"已自动发送 '任务意外中断，请继续！' (empty_response, sess_demo8888-a6ae-489a-b1f2-…)",'hit']]},
 
  {id:'fake', grp:'会触发并发送', label:'额度“假成功”', tone:'b', ch:'B',
   rule:'B0 特征串全命中 + 结构门（信封文本/错误 responseId）：qoder error 403 + "code":"115" + agentLimitResetTime', out:'发送', outKind:'send', blockAt:-1,
   note:'最阴的一类：错误文本被桥接端当成正常回答返回，ZCode 视角这一 turn 是"完成"的，永远不会有 turn.failed。只能从模型 IO 日志里认出来。',
   logs:[['00:11:58','检测到 provider 额度报错: 会话 sess_demo8888-…, responseId=qoder-error-xxxx…, 额度重置≈2026-09-13 15:21:10','hit'],
-        ['00:11:59','归位成功(顶栏标题验证): 「❤️示例会话乙」','hit'],
+        ['00:11:59','归位成功(顶栏标题验证): 「●示例会话乙」','hit'],
         ['00:12:00',"已自动发送 '任务意外中断，请继续！' (quota, sess_demo8888-…)",'hit'],
         ['00:12:00','（额度报错也照发不误：同一窗口内的再次报错算独立中断，直到试满 5 次才熔断）','gone']]},
 
  {id:'burst', grp:'会触发并发送', label:'连续中断（各自独立响应）', tone:'a', ch:'A',
   rule:'节奏由中断事件驱动：每次新 turnId 独立处理，不设时间冷却', out:'发送', outKind:'send', blockAt:-1,
   note:'中断的间隔由 ZCode 自身的重试耗时决定，时长时短。旧版有个 15 秒固定冷却，实测曾把"另一个会话的独立中断"当成重复而静默丢掉；现在只认事件不认钟表——每来一次中断就发一次，直到该会话累计 5 次未恢复触发熔断。',
-  logs:[['10:46:07','归位成功(顶栏标题验证): 「❤️示例会话甲」','hit'],
+  logs:[['10:46:07','归位成功(顶栏标题验证): 「●示例会话甲」','hit'],
         ['10:46:08',"已自动发送 '任务意外中断，请继续！' (connection, sess_demo1111-…) 计数 1",'hit'],
-        ['10:52:46','归位成功(顶栏标题验证): 「❤️示例会话甲」','hit'],
+        ['10:52:46','归位成功(顶栏标题验证): 「●示例会话甲」','hit'],
         ['10:52:47',"已自动发送 '任务意外中断，请继续！' (connection, sess_demo1111-…) 计数 2",'hit'],
-        ['16:09:34','归位成功(顶栏标题验证): 「❤️示例会话甲」','hit'],
+        ['16:09:34','归位成功(顶栏标题验证): 「●示例会话甲」','hit'],
         ['16:09:35',"已自动发送 '任务意外中断，请继续！' (invalid_model_request, sess_demo1111-…) 计数 3",'hit'],
         ['—','（间隔 6 分钟与 5 小时各一次，均为独立中断，逐条响应；无任何"冷却跳过"）','gone']]},
 
@@ -670,14 +698,14 @@ var SC=[
  {id:'navfail', grp:'被安全策略放弃', label:'归位失败（标题不唯一）', tone:'guard', ch:'A',
   rule:'侧栏无唯一匹配行 → 宁可不发', out:'放弃', outKind:'block', blockAt:4,
   note:'生产环境至今零次。历史上 3 次都发生在调试期：两次是故意构造的边界用例（重复标题 ×20、虚拟列表外的旧会话），一次是在手动切窗口时目标行不在已挂载的最近约 5 条内。出错会话必然刚活动过、必在侧栏前列，所以正常场景不会触发。',
-  logs:[['09:52:16','归位失败: 侧栏无唯一匹配行(未找到或歧义) 「❤️示例会话乙」(详见 navigate.log)','stop'],
+  logs:[['09:52:16','归位失败: 侧栏无唯一匹配行(未找到或歧义) 「●示例会话乙」(详见 navigate.log)','stop'],
         ['09:52:16','按「宁可不发」策略放弃本次发送 (connection, sess_…)','stop'],
         ['—','（生产期 23 条归位记录中，失败 0 条；12 次自动发送全部成功归位）','gone']]},
 
  {id:'draft', grp:'被安全策略放弃', label:'输入框有草稿', tone:'guard', ch:'A',
   rule:'草稿检测非空 → 放弃发送', out:'放弃', outKind:'block', blockAt:4,
   note:'你已经打了一半的话还没发。此刻注入会让续命消息拼在你的草稿后面一起发出去，所以直接放弃这次自动发送。',
-  logs:[['10:05:56','归位失败: 输入框有未发送草稿,为不污染原对话放弃发送 「❤️示例会话乙」(详见 navigate.log)','stop']]},
+  logs:[['10:05:56','归位失败: 输入框有未发送草稿,为不污染原对话放弃发送 「●示例会话乙」(详见 navigate.log)','stop']]},
 
  {id:'down', grp:'根本没到', label:'监视器没在运行', tone:'down', ch:null,
   rule:'这条信号从未被读取', out:'漏发', outKind:'down', blockAt:0,

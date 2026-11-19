@@ -9,3 +9,9 @@ tests/syn-rollout/
 tests/syn-watcher.log
 tests/test-watcher.log
 tests/t3[0-9]-*
+# 桌面面板运行态 / 临时目录
+ui_state.json
+panel_runtime.json
+panel_runtime.json.tmp
+desktop-crash.log
+tmp/

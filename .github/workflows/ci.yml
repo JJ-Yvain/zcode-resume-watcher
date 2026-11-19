@@ -19,8 +19,12 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
-      - name: Synthetic regression (104 checks, no real messages sent)
+      - name: Engine synthetic regression (112 checks, no real messages sent)
         run: python tests/driver.py
+      - name: Desktop shell seams (12 checks)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -m unittest discover -s tests/web_shell -p "test_*.py"
       - name: CLI smoke (--version / --check-updates)
         env:
           PYTHONIOENCODING: utf-8   # Windows runner stdout 默认 cp1252,会炸中文输出
