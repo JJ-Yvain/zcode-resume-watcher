@@ -46,8 +46,9 @@ ZCode 里跑长任务时，两类失败会让任务悄悄死掉，人却未必�
 
 ### Windows（全功能）
 
-1. 从 [Releases](../../releases) 下载安装包 `ZCodeResumeWatcher-<version>-Setup.exe`（v1.2.0 起；
-   或 `git clone` 本仓库，按 `packaging/README.md` 自行构建；Release 包可能滞后）；
+1. v1.2.0 尚未发 Release；安装包 `ZCodeResumeWatcher-<version>-Setup.exe` 从
+   **GitHub Actions → Desktop Build run 的 Artifacts** 下载（或 `git clone` 本仓库，
+   按 `packaging/README.md` 自行构建；v1.2.0 正式发版后可从 Releases 下载）；
 2. 运行安装包：默认当前用户安装，向导可选目录/所有用户；创建开始菜单和**桌面快捷方式**
    （桌面可取消），可选登录启动；卸载走 Windows 设置；
 3. 安装版内置 Python，无需预装。
@@ -174,8 +175,11 @@ python zcode_resume_watcher.py --version            # 当前版本
 - **Fully local**: zero third-party dependencies, no telemetry; `--check-updates` only pings the GitHub API (disable via `check_updates: false`).
 - **Desktop panel** (v1.2.0): a local single-file HTML panel in an Edge/Chrome app window (Windows/macOS) + tray/menu bar; 24h recovery list, four-stage chain, light/dark themes, pause/test-send, remembered window size. Closing the window keeps the engine running; use the tray/menu bar to quit.
 - **Platforms**: Windows full-featured; macOS experimental (AppleScript injection + AX-based smart re-focus in beta; Accessibility permission required; no draft-check yet).
-- **Install**: download `ZCodeResumeWatcher-<version>-Setup.exe` from [Releases](../../releases) (v1.2.0+)
-  and run it — per-user install, selectable directory/all-users, Start Menu + desktop shortcut, optional
-  login start, bundled Python. Or run from source with `python ZCode续命面板.pyw` (Python 3.12+).
-  macOS: build the menu-bar `.app` with `packaging/build_macos.sh`, or run `python3 ZCode续命面板.pyw`
-  from source. See the Chinese sections above for full details.
+- **Install**: v1.2.0 is not released yet. Download `ZCodeResumeWatcher-<version>-Setup.exe`
+  (and the macOS DMG) from the **Desktop Build** workflow run artifacts, or build from source
+  (`packaging/README.md`). Once v1.2.0 is released, the installer will be attached to Releases.
+  The installer is per-user by default with selectable directory/all-users, Start Menu + desktop
+  shortcut, optional login start, bundled Python. Or run from source with
+  `python ZCode续命面板.pyw` (Python 3.12+). macOS: build the menu-bar `.app` with
+  `packaging/build_macos.sh`, or run `python3 ZCode续命面板.pyw` from source.
+  See the Chinese sections above for full details.
