@@ -1,3 +1,6 @@
 *.bat text eol=crlf
 *.ps1 text eol=crlf
 *.command text eol=lf
+*.sh text eol=lf
+*.iss text
+*.icns binary

@@ -12,13 +12,14 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import signal
 import sys
 import threading
 import time
 import urllib.request
 
-from . import platform_services
+from . import app_paths, platform_services
 from .engine_host import configure_engine, import_engine
 from .web_runtime import WebRuntime
 from .web_server import PanelServer, UIState
@@ -84,10 +85,20 @@ def _activate(record):
 
 
 class DesktopApp:
-    def __init__(self, root=ROOT, test_root=None, no_open=False, port=0,
-                 no_tray=False):
+    def __init__(self, root=ROOT, test_root=None, data_root=None, no_open=False,
+                 port=0, no_tray=False):
         self.root = os.path.abspath(root)
-        self.data_root = os.path.abspath(test_root) if test_root else self.root
+        if data_root:
+            self.data_root = os.path.abspath(data_root)
+        elif test_root:
+            self.data_root = os.path.abspath(test_root)
+        else:
+            self.data_root = self.root
+        self.external_data = os.path.normcase(self.data_root) != os.path.normcase(
+            self.root)
+        self.panel_path = os.path.join(self.root, "desktop", "webui",
+                                       "panel.html")
+        self.assets_dir = os.path.join(self.root, "desktop", "assets")
         self.no_open = no_open
         self.no_tray = no_tray
         self.port = port
@@ -138,10 +149,10 @@ class DesktopApp:
         return None
 
     def start(self):
-        if not os.path.exists(PANEL):
+        if not os.path.exists(self.panel_path):
             platform_services.message_box(
                 "ZCode 续命监视器",
-                "面板文件缺失：\n%s\n\n请先运行 原型/_src/build.py。" % PANEL,
+                "面板文件缺失：\n%s\n\n请先运行 原型/_src/build.py。" % self.panel_path,
                 error=True)
             return False
 
@@ -151,15 +162,22 @@ class DesktopApp:
                 _activate(existing)
             return False
 
-        if self.is_test:
+        if self.external_data:
             os.makedirs(self.data_root, exist_ok=True)
-            for d in ("zcode-log", "rollout"):
-                os.makedirs(os.path.join(self.data_root, d), exist_ok=True)
+            if self.is_test:
+                app_paths.ensure_data_root(self.data_root)
             try:
                 open(os.path.join(self.data_root, "watcher.log"),
                      "a", encoding="utf-8").close()
             except OSError:
                 pass
+            config_dst = os.path.join(self.data_root, "config.json")
+            config_src = os.path.join(self.root, "config.json")
+            if not os.path.exists(config_dst) and os.path.exists(config_src):
+                try:
+                    shutil.copyfile(config_src, config_dst)
+                except OSError:
+                    pass
 
         self.engine = import_engine(self.root)
         self.mutex = self.engine.acquire_single_instance(self._mutex_name())
@@ -178,13 +196,16 @@ class DesktopApp:
             return False
 
         overrides = {}
+        if self.external_data:
+            # 只把本 app 的 watcher.log/navigate.log 放到用户目录;
+            # LOG_DIR/ROLLOUT_DIR/DB_PATH 是 ZCode 的真实数据源,不能改到空目录。
+            overrides["log_file"] = os.path.join(self.data_root, "watcher.log")
         if self.is_test:
-            overrides = {
-                "log_file": os.path.join(self.data_root, "watcher.log"),
+            overrides.update({
                 "log_dir": os.path.join(self.data_root, "zcode-log"),
                 "rollout_dir": os.path.join(self.data_root, "rollout"),
                 "db_path": os.path.join(self.data_root, "db.sqlite"),
-            }
+            })
         configure_engine(self.engine, self.root,
                          config_path=self._config_path(), **overrides)
 
@@ -210,7 +231,7 @@ class DesktopApp:
         token = secrets.token_hex(16)
         self.server = PanelServer(
             runtime=self.runtime,
-            panel_path=PANEL,
+            panel_path=self.panel_path,
             token=token,
             port=self.port,
             read_only=False,
@@ -268,10 +289,9 @@ class DesktopApp:
                 self._window_size = size
 
     def _config_path(self):
-        if self.is_test:
-            candidate = os.path.join(self.data_root, "config.json")
-            if os.path.exists(candidate):
-                return candidate
+        candidate = os.path.join(self.data_root, "config.json")
+        if (self.external_data or self.is_test) and os.path.exists(candidate):
+            return candidate
         return os.path.join(self.root, "config.json")
 
     def _engine_main(self):
@@ -379,6 +399,8 @@ class DesktopApp:
         _say("面板: %s" % self._url)
         if sys.platform == "win32" and not self.no_tray:
             _say("托盘: 右键菜单可暂停/测试/退出; 关掉 Edge 窗口不会退出引擎")
+        elif sys.platform == "darwin" and not self.no_tray:
+            _say("菜单栏: 点击图标可打开面板/暂停/退出")
         else:
             _say("无托盘模式: Ctrl+C / SIGTERM 退出; 关掉面板窗口不会退出引擎")
         if sys.platform == "win32" and not self.no_tray:
@@ -393,7 +415,7 @@ class DesktopApp:
                     "quit": self.request_quit,
                 },
                 snapshot=lambda: {"state": self.display_state()},
-                assets_dir=ASSETS,
+                assets_dir=self.assets_dir,
             )
             if not self.tray.run():
                 platform_services.message_box(
@@ -403,18 +425,29 @@ class DesktopApp:
                     error=True)
                 self.shutdown()
                 return 1
+        elif sys.platform == "darwin" and not self.no_tray:
+            try:
+                from .mac_menu import run_menu
+                handled = run_menu(self)
+            except Exception:
+                handled = False
+            if not handled:
+                self._wait_signals()
         else:
-            for name in ("SIGTERM", "SIGINT", "SIGHUP"):
-                sig = getattr(signal, name, None)
-                if sig is not None:
-                    try:
-                        signal.signal(sig, lambda *_: self.request_quit())
-                    except (OSError, ValueError):
-                        pass
-            while not self.quit_event.wait(0.5):
-                pass
+            self._wait_signals()
         self.shutdown()
         return 0
+
+    def _wait_signals(self):
+        for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+            sig = getattr(signal, name, None)
+            if sig is not None:
+                try:
+                    signal.signal(sig, lambda *_: self.request_quit())
+                except (OSError, ValueError):
+                    pass
+        while not self.quit_event.wait(0.5):
+            pass
 
     def shutdown(self):
         if self._shut:
@@ -500,8 +533,12 @@ def main(argv=None):
     platform_services.set_app_user_model_id()
     if args.demo:
         return run_demo(no_open=args.no_open, port=args.port)
-    app = DesktopApp(test_root=args.test_root, no_open=args.no_open,
-                     port=args.port, no_tray=args.no_tray)
+    data_root = None
+    if app_paths.is_frozen() and not args.test_root:
+        data_root = app_paths.default_data_root()
+    app = DesktopApp(test_root=args.test_root, data_root=data_root,
+                     no_open=args.no_open, port=args.port,
+                     no_tray=args.no_tray)
     if args.test_seconds > 0:
         threading.Timer(args.test_seconds, app.request_quit).start()
     return app.run()

@@ -561,22 +561,23 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
 <section class="wrap wrap--wide">
   <div class="sec-h">
     <h2>桌面壳：把引擎装进托盘，不碰判定</h2>
-    <span class="hint">双击 启动续命面板.bat</span>
+    <span class="hint">从开始菜单 / 菜单栏启动</span>
   </div>
-  <p class="sec-note">v1.2.0 新增的一层。引擎仍是唯一判定者；面板只读日志、只发四个控制动作（暂停/继续/测试发送/打开文件），所有动作仍走原来的守卫。</p>
+  <p class="sec-note">v1.2.0 新增的一层。引擎仍是唯一判定者；面板只读日志、只发四个控制动作（暂停/继续/测试发送/打开文件），所有动作仍走原来的守卫。Windows 安装版进开始菜单，macOS 安装版是菜单栏 `.app`。</p>
 
   <div class="audit">
     <article><div class="n">进程 一</div><h3>引擎线程</h3><p>原 <code>run_watcher</code> 放进后台线程，多一个 <code>stop_event</code>；判定、去重、熔断、归位、注入、送达核验一行没改。</p></article>
     <article><div class="n">进程 二</div><h3>本地面板</h3><p><code>127.0.0.1</code> 随机端口 + 每次启动随机 token；<code>/api/*</code> 校验 <code>X-Token</code> 与 Host。面板是单文件 HTML，无外部请求。</p></article>
-    <article><div class="n">进程 三</div><h3>Edge app 窗</h3><p>系统 Edge <code>--app</code> 打开 1440×900 无地址栏窗口；关闭窗口只收起界面，引擎留在托盘继续跑。</p></article>
-    <article><div class="n">进程 四</div><h3>托盘</h3><p>ctypes <code>Shell_NotifyIcon</code>：运行 sage、暂停 amber、异常 rust；菜单可暂停/测试/看日志/退出。测试发送先弹原生确认。</p></article>
+    <article><div class="n">进程 三</div><h3>应用窗</h3><p>Windows 用系统 Edge <code>--app</code>；macOS 优先 Chrome/Edge <code>--app</code>，都没有时默认浏览器。关闭窗口只收起界面，引擎留在托盘/菜单栏继续跑。</p></article>
+    <article><div class="n">进程 四</div><h3>托盘 / 菜单栏</h3><p>Windows ctypes <code>Shell_NotifyIcon</code>（运行 sage、暂停 amber、异常 rust）；macOS rumps 菜单栏。菜单可暂停/测试/看日志/退出。测试发送先弹原生确认。</p></article>
     <article><div class="n">进程 五</div><h3>单实例</h3><p>与 CLI 共用 <code>Local\ZCodeResumeWatcher</code> 互斥体；二次启动读 <code>panel_runtime.json</code> 并 ping，直接唤回已有面板，不启第二个引擎。</p></article>
     <article><div class="n">进程 六</div><h3>有序退出</h3><p>暂停 → 停循环 → 等在途发送（≤30s）→ join → 写「监视器退出」遗言 → 停 HTTP → 删运行时文件 → 释放互斥体。</p></article>
   </div>
 
   <div class="finding">
     <h3>为什么不是 Tkinter</h3>
-    <p>Tk 原型的信息结构能过，但视觉精度不够（用户直说「AI slop」）。换成本地 HTML + Edge app 窗后，才做到发丝线、亮暗双主题和精确对齐；代价是依赖系统 Edge，不引入 Electron/WebView2。引擎回归仍是 <strong>112/112</strong>，桌面壳另加 <strong>12/12</strong> 接缝测试。</p>
+    <p>Tk 原型的信息结构能过，但视觉精度不够（用户直说「AI slop」）。换成本地 HTML + 浏览器 app 窗后，才做到发丝线、亮暗双主题和精确对齐；代价是依赖系统浏览器，不引入 Electron/WebView2。引擎回归仍是 <strong>112/112</strong>，桌面壳另加 <strong>12/12</strong> 接缝测试。</p>
+    <p class="mono">安装式入口：Windows PyInstaller onedir + Inno Setup（开始菜单/可选登录启动）；macOS PyInstaller .app + rumps 菜单栏。安装版数据写用户目录，不写应用目录。</p>
     <p class="mono">踩坑：固定端口会被本机别的 app 的 Service Worker 劫持；专用 Edge profile 会弹账号同步提示；125% DPI 下需 Win32 定尺寸而不是只信 --window-size。</p>
   </div>
 </section>
@@ -585,7 +586,7 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
 <section class="wrap wrap--wide">
   <div class="sec-h">
     <h2>落到磁盘上是什么</h2>
-    <span class="hint">整目录复制即可迁移，无安装步骤</span>
+    <span class="hint">安装版从开始菜单/菜单栏启动；源码可整目录复制</span>
   </div>
   <table class="files">
     <thead><tr><th>文件</th><th>规模</th><th>职责</th></tr></thead>
@@ -594,12 +595,13 @@ footer{margin-top:76px;padding:26px 0 54px;border-top:1px solid var(--line);
       <tr><td>uia_navigate_input.ps1</td><td>342 行</td><td>侧栏定位点击、顶栏标题验证、草稿读取、输入框聚焦（只认可见、可聚焦且 class 匹配聊天输入框特征的 Edit）；聚焦后回读 FocusedElement 核验落地，没落地报 8；身份失败打 CANDIDATES 候选清单。纯 ASCII，中文用码点串传参。</td></tr>
       <tr><td>uia_focus_input.ps1</td><td>149 行</td><td>兜底聚焦：归位未走到输入框时，独立把底部 Edit 设为焦点；跳过离屏/不可聚焦节点；识别不出聊天输入框报 7、焦点没落地报 8，一律拒绝盲打字。</td></tr>
       <tr><td>config.json</td><td>40 键</td><td>消息文本、两个日志源、黑名单、阈值、正则、送达核验与重试、判官端点全部可调。</td></tr>
-      <tr><td>启动自动续命.bat</td><td>—</td><td>双击常驻。带 Python 自动引导：已装则直接用，没装则从 python.org 拉绿色便携版到用户目录，不碰注册表与 PATH。</td></tr>
-      <tr><td>启动续命面板.bat / ZCode续命面板.pyw</td><td>—</td><td>v1.2.0 推荐入口：pythonw 无黑窗；系统 Edge 以 --app 打开 1440×900 本地面板；关闭窗口后引擎留在托盘。</td></tr>
-      <tr><td>desktop/</td><td>9 模块 + 面板</td><td>桌面壳：web_app（引擎线程/托盘/单实例）、web_runtime（日志→面板数据）、web_server（127.0.0.1+token）、tray_win（ctypes 托盘）、engine_host、platform_services、web_preview、make_icons、webui/panel.html。</td></tr>
-      <tr><td>desktop/webui/panel.html</td><td>82 KB</td><td>单文件自包含面板（生成物）：A 方向恢复控制台、四段链路、亮暗双主题；源在私有仓 原型/_src/。</td></tr>
+      <tr><td>ZCodeResumeWatcher.exe / Setup.exe</td><td>—</td><td>Windows 安装式入口：PyInstaller onedir + Inno Setup；开始菜单/可选桌面快捷方式、可选登录启动、卸载器；安装版数据写 <code>%LOCALAPPDATA%\\ZCodeResumeWatcher</code>。</td></tr>
+      <tr><td>ZCode续命面板.pyw</td><td>—</td><td>源码入口：<code>python ZCode续命面板.pyw</code> 启动面板；控制台/测试发送用 <code>python zcode_resume_watcher.py</code> / <code>--test-send</code>。普通用户用安装版，不需要脚本。</td></tr>
+      <tr><td>desktop/</td><td>12 模块 + 面板</td><td>桌面壳：app_entry（打包入口）、app_paths（bundle/data 路径）、mac_menu（macOS 菜单栏）、web_app（引擎线程/托盘/单实例）、web_runtime（日志→面板数据）、web_server（127.0.0.1+token）、tray_win（ctypes 托盘）、engine_host、platform_services、web_preview、make_icons、webui/panel.html。</td></tr>
+      <tr><td>packaging/</td><td>—</td><td>PyInstaller windows/macos spec、Inno Setup 安装脚本、双平台构建脚本/CI 模板。</td></tr>
+      <tr><td>desktop/webui/panel.html</td><td>104 KB</td><td>单文件自包含面板（生成物）：A 方向恢复控制台、四段链路、亮暗双主题；源在私有仓 原型/_src/。</td></tr>
       <tr><td>tests/web_shell/</td><td>12 项</td><td>桌面壳接缝测试：日志观察者、暂停闸门、停止信号、互斥体名、运行时四段链路、面板 API、app 生命周期。</td></tr>
-      <tr><td>测试发送.bat</td><td>—</td><td>10 秒倒计时后试发一条，用来验证注入链是否通。</td></tr>
+      <tr><td>python zcode_resume_watcher.py --test-send</td><td>—</td><td>10 秒倒计时后试发一条，用来验证注入链是否通（安装版面板也有「测试发送」按钮）。</td></tr>
       <tr><td>watcher.log / navigate.log</td><td>—</td><td>运行与归位决策日志。含会话标题，因此不进版本库。</td></tr>
     </tbody>
   </table>

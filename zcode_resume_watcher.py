@@ -2020,7 +2020,7 @@ def audit_mode(args):
     p("[六] 建议")
     tips = []
     if unattended:
-        tips.append("有 %d 条应触发事件因监视器未运行被漏:双击 启动自动续命.bat 常驻(最小化即可)"
+        tips.append("有 %d 条应触发事件因监视器未运行被漏:从开始菜单启动(或 python zcode_resume_watcher.py 常驻)"
                     % len(unattended))
     if running_anomaly:
         tips.append("有 %d 条运行中却无处理记录:需排查处理链路(可能是新 bug)" % len(running_anomaly))

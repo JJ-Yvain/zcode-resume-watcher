@@ -307,6 +307,28 @@ def open_edge_app(url, width=1440, height=900, on_window=None):
                                    "ZCode 续命监视器", on_window),
                              name="edge-window-fit", daemon=True).start()
             return True
+    elif IS_MACOS:
+        # macOS 没有系统 Edge 也能用 Chrome/Edge 的 --app 窗;都没有就回落默认浏览器。
+        home = os.path.expanduser("~")
+        candidates = [
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            os.path.join(home, "Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            os.path.join(home, "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ]
+        for exe in candidates:
+            if not os.path.exists(exe):
+                continue
+            try:
+                subprocess.Popen(
+                    [exe,
+                     "--window-size=%d,%d" % (int(width), int(height)),
+                     "--no-first-run", "--no-default-browser-check",
+                     "--app=" + url],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            except OSError:
+                continue
     return open_path(url)
 
 

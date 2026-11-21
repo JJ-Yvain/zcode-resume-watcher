@@ -14,6 +14,7 @@ import unittest
 import urllib.error
 import urllib.request
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -176,14 +177,20 @@ class WebShellTests(unittest.TestCase):
     # ---- Web 运行时 ----
     def test_runtime_rebuilds_four_stages(self):
         log = self.tmp / "history.log"
+        base = datetime.now() - timedelta(hours=3)
+
+        def ts(minutes=0, seconds=0):
+            return (base + timedelta(minutes=minutes, seconds=seconds)).strftime(
+                "%Y-%m-%d %H:%M:%S")
+
         log.write_text("\n".join([
-            "2026-11-19 10:00:00 监视器启动 (平台: Windows, PID 1, 轮询 1.0s, live)",
-            "2026-11-19 10:05:00 归位成功(顶栏标题验证): 「测试会话」",
-            "2026-11-19 10:05:02 已自动发送并确认送达 '任务意外中断，请继续！' "
+            ts() + " 监视器启动 (平台: Windows, PID 1, 轮询 1.0s, live)",
+            ts(5) + " 归位成功(顶栏标题验证): 「测试会话」",
+            ts(5, 2) + " 已自动发送并确认送达 '任务意外中断，请继续！' "
             "(connection, sess_test0001-aaaa-bbbb-cccc-dddd00000001)",
-            "2026-11-19 10:10:00 熔断中,跳过自动发送 "
+            ts(10) + " 熔断中,跳过自动发送 "
             "(会话 sess_test0001-aaaa-bbbb-cccc-dddd00000001, 连续 5 次未恢复,等 turn.completed 复位)",
-            "2026-11-19 10:20:00 ⚠ 监视器退出: 测试退出 (PID 1)",
+            ts(20) + " ⚠ 监视器退出: 测试退出 (PID 1)",
         ]) + "\n", encoding="utf-8")
         rt = WebRuntime(version="t", breaker_limit=5)
         rt.seed_from_log(str(log))

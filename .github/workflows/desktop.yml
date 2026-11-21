@@ -1,0 +1,57 @@
+name: Desktop Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Install build deps
+        run: python -m pip install -r packaging/requirements-build.txt
+      - name: Build onedir
+        run: python -m PyInstaller --noconfirm --clean packaging/windows.spec
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path zcode_resume_watcher.py -Pattern '^VERSION = "([\d.]+)"').Matches[0].Groups[1].Value
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$v" "packaging\windows.iss"
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/installer/*.exe
+            dist/ZCodeResumeWatcher/**
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Install build deps
+        run: python -m pip install -r packaging/requirements-build.txt
+      - name: Build .app
+        run: python -m PyInstaller --noconfirm --clean packaging/macos.spec
+      - name: Sign (ad-hoc) and package DMG
+        run: |
+          APP="dist/ZCode 续命监视器.app"
+          codesign --deep --force --sign - "$APP" || true
+          VERSION=$(python -c "import re;print(re.search(r'^VERSION = \"([\\d.]+)\"', open('zcode_resume_watcher.py', encoding='utf-8').read(), re.M).group(1))")
+          hdiutil create -volname "ZCode 续命监视器" -srcfolder "$APP" \
+            -ov -format UDZO "dist/ZCodeResumeWatcher-${VERSION}.dmg"
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.dmg

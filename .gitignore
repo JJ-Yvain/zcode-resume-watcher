@@ -15,3 +15,5 @@ panel_runtime.json
 panel_runtime.json.tmp
 desktop-crash.log
 tmp/
+build/
+dist/
